@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>보리 호흡 모니터</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="header-left">
+        <span class="app-icon">🐾</span>
+        <h1>보리 호흡 모니터</h1>
+      </div>
+      <nav>
+        <button class="nav-btn active" data-tab="measure">측정</button>
+        <button class="nav-btn" data-tab="history">기록</button>
+      </nav>
+    </header>
+
+    <!-- ========== 측정 탭 ========== -->
+    <main id="measure-tab" class="tab-content active">
+
+      <!-- 모드 선택 -->
+      <div id="mode-selector">
+        <button class="mode-btn active" data-mode="manual">
+          <span class="mode-icon">👆</span>
+          <span>수동 탭</span>
+        </button>
+        <button class="mode-btn" data-mode="auto">
+          <span class="mode-icon">📹</span>
+          <span>자동 영상분석</span>
+        </button>
+      </div>
+
+      <!-- ===== 수동 탭 모드 ===== -->
+      <div id="manual-mode" class="mode-content active">
+        <div id="manual-info">
+          <p>보리가 숨 쉴 때마다 아래 버튼을 탭하세요.<br>
+          가슴/배가 올라올 때 한 번씩 누르면 자동 시작됩니다.</p>
+        </div>
+
+        <!-- 수동 BPM 표시 -->
+        <div id="manual-display">
+          <div class="bpm-circle" id="manual-bpm-circle">
+            <span class="bpm-number" id="manual-bpm">--</span>
+            <span class="bpm-label">회/분</span>
+          </div>
+          <div id="manual-status-text">탭하면 자동으로 시작됩니다</div>
+          <div id="manual-tap-count">탭: <span id="tap-count-num">0</span>회</div>
+          <div id="manual-timer">경과: <span id="manual-elapsed">0:00</span></div>
+        </div>
+
+        <!-- 탭 버튼 -->
+        <button id="btn-tap" class="tap-btn">
+          <span class="tap-icon">🫁</span>
+          <span class="tap-text">숨 쉴 때 탭!</span>
+        </button>
+
+        <!-- 수동 컨트롤 -->
+        <div id="manual-controls">
+          <button id="btn-manual-stop" class="control-btn danger hidden">
+            <span>측정 완료</span>
+          </button>
+          <button id="btn-manual-reset" class="control-btn secondary">
+            <span>초기화</span>
+          </button>
+        </div>
+
+        <!-- 최근 탭 간격 시각화 -->
+        <div id="tap-intervals">
+          <div id="tap-interval-bars"></div>
+        </div>
+      </div>
+
+      <!-- ===== 자동 영상분석 모드 ===== -->
+      <div id="auto-mode" class="mode-content">
+        <div id="auto-status-bar">
+          <span id="auto-status-text">카메라를 시작하세요</span>
+          <span id="auto-status-dot" class="dot-idle"></span>
+        </div>
+
+        <!-- 비디오 + ROI -->
+        <div id="video-container">
+          <video id="video" playsinline autoplay muted></video>
+          <canvas id="overlay-canvas"></canvas>
+          <div id="roi-instruction" class="hidden">보리의 배/가슴 부위를 드래그</div>
+          <div id="timer-display" class="hidden">0:00</div>
+          <div id="no-camera">
+            <span>📹</span>
+            <p>카메라를 시작하여<br>보리의 호흡을 측정하세요</p>
+          </div>
+        </div>
+
+        <!-- 플래시 & 밝기 컨트롤 -->
+        <div id="light-controls" class="hidden">
+          <button id="btn-flash" class="flash-btn">
+            <span id="flash-icon">🔦</span>
+            <span id="flash-label">플래시 켜기</span>
+          </button>
+          <div id="brightness-control">
+            <span class="brightness-label">화면 밝기</span>
+            <div class="brightness-slider-row">
+              <span class="brightness-min">🌙</span>
+              <input type="range" id="brightness-slider" min="0" max="100" value="0">
+              <span class="brightness-max">☀️</span>
+            </div>
+          </div>
+        </div>
+        <!-- 화면 조명 오버레이 (밝기 슬라이더용) -->
+        <div id="screen-light" class="hidden"></div>
+
+        <!-- 자동 BPM 표시 -->
+        <div id="auto-bpm-display" class="hidden">
+          <div class="bpm-row">
+            <span class="bpm-number" id="auto-bpm">--</span>
+            <span class="bpm-label">회/분</span>
+          </div>
+          <div id="auto-breath-status">분석 중...</div>
+          <canvas id="wave-canvas" height="50"></canvas>
+        </div>
+
+        <!-- 자동 컨트롤 -->
+        <div id="auto-controls">
+          <button id="btn-camera" class="control-btn primary">카메라 시작</button>
+          <button id="btn-roi" class="control-btn secondary hidden">영역 선택</button>
+          <button id="btn-auto-measure" class="control-btn accent hidden">측정 시작</button>
+          <button id="btn-auto-stop" class="control-btn danger hidden">측정 완료</button>
+        </div>
+
+        <details id="auto-settings">
+          <summary>설정</summary>
+          <div class="settings-body">
+            <label>측정 시간
+              <select id="measure-duration">
+                <option value="30">30초</option>
+                <option value="60" selected>60초</option>
+                <option value="120">120초</option>
+              </select>
+            </label>
+            <label>감도
+              <select id="sensitivity">
+                <option value="low">낮음</option>
+                <option value="medium" selected>보통</option>
+                <option value="high">높음</option>
+                <option value="very_high">매우 높음</option>
+                <option value="ultra">최고</option>
+              </select>
+            </label>
+            <label>카메라
+              <select id="camera-select">
+                <option value="environment">후면</option>
+                <option value="user">전면</option>
+              </select>
+            </label>
+          </div>
+        </details>
+
+        <details id="algo-info">
+          <summary>SRR 알고리즘 설명</summary>
+          <div class="algo-body">
+            <p><b>SRR이란?</b><br>Sleeping Respiratory Rate — 수면 호흡수. 가슴/배가 한 번 올라갔다 내려오면 = 1회 호흡으로 셉니다.</p>
+            <p><b>1. ROI 밝기 추적</b><br>선택한 영역의 평균 밝기를 매 프레임 기록합니다. 가슴이 오르면 빛 반사가 변하여 밝기 신호가 주기적으로 변합니다.</p>
+            <p><b>2. 신호 전처리</b><br>선형 추세 제거(조명 변화 보정) → 이동평균 스무딩(노이즈 제거) → 정규화</p>
+            <p><b>3. 자기상관 분석</b><br>신호가 자기 자신과 얼마나 반복되는지 계산합니다. 호흡이 규칙적이면 호흡 주기에 해당하는 지점에서 강한 피크가 나타납니다.</p>
+            <p><b>4. 피크 카운팅 교차 검증</b><br>자기상관 결과를 시간축 피크 검출로 이중 확인하여 정확도를 높입니다.</p>
+            <p><b>5. 모션 게이트</b><br>카메라 흔들림이나 강아지 움직임 감지 시 해당 프레임을 자동 제외합니다.</p>
+            <p class="algo-note">촬영 팁: 삼각대나 받침대에 폰 고정 / 일정한 조명 / 보리가 깊이 잠든 상태에서 측정하세요.</p>
+          </div>
+        </details>
+      </div>
+    </main>
+
+    <!-- ========== 기록 탭 ========== -->
+    <main id="history-tab" class="tab-content">
+      <div id="history-summary">
+        <div class="summary-card">
+          <span class="summary-label">7일 평균</span>
+          <span id="avg-7days" class="summary-value">--</span>
+          <span class="summary-unit">회/분</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">최근</span>
+          <span id="last-measurement" class="summary-value">--</span>
+          <span class="summary-unit">회/분</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">총 기록</span>
+          <span id="total-records" class="summary-value">0</span>
+          <span class="summary-unit">건</span>
+        </div>
+      </div>
+
+      <div id="chart-container">
+        <canvas id="history-chart"></canvas>
+      </div>
+
+      <div id="threshold-info">
+        <span><span class="dot green"></span> 정상 &lt;30</span>
+        <span><span class="dot yellow"></span> 주의 30~39</span>
+        <span><span class="dot red"></span> 위험 40+</span>
+      </div>
+
+      <div id="history-list"></div>
+
+      <div id="export-controls">
+        <button id="btn-export" class="control-btn secondary">📋 CSV 내보내기</button>
+        <button id="btn-clear-history" class="control-btn danger-outline">🗑️ 전체 삭제</button>
+      </div>
+    </main>
+
+    <!-- 결과 모달 -->
+    <div id="result-modal" class="modal hidden">
+      <div class="modal-content">
+        <div id="result-icon">🐾</div>
+        <h2>측정 완료</h2>
+        <div id="result-bpm-display">
+          <span id="result-bpm">--</span>
+          <span class="result-unit">회/분</span>
+        </div>
+        <div id="result-status"></div>
+        <p id="result-datetime"></p>
+        <p id="result-info"></p>
+        <div class="memo-row">
+          <input type="text" id="result-memo" placeholder="메모 (선택사항)">
+        </div>
+        <div class="modal-buttons">
+          <button id="result-save" class="control-btn accent">저장</button>
+          <button id="result-discard" class="control-btn secondary">취소</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 알림 모달 -->
+    <div id="alert-modal" class="modal hidden">
+      <div class="modal-content">
+        <div id="alert-icon">ℹ️</div>
+        <h2 id="alert-title"></h2>
+        <p id="alert-message"></p>
+        <p id="alert-details" class="alert-details"></p>
+        <button id="alert-close" class="control-btn primary">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="breathing-analyzer.js"></script>
+  <script src="app.js"></script>
+  <script>
+    // PWA Service Worker 등록
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then(() => console.log('SW registered'))
+          .catch(e => console.log('SW failed:', e));
+      });
+    }
+  </script>
+</body>
+</html>
