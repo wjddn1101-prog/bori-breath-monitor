@@ -339,7 +339,7 @@ class BreathingAnalyzer {
     this.debugInfo.channel = bestChannel;
   }
 
-  // ========== 칼만 필터 ==========
+  // ========== 칼만 필터 (적응형) ==========
   _kalmanUpdate(measurement) {
     var k = this._kalman;
     if (!k.initialized) {
@@ -348,8 +348,19 @@ class BreathingAnalyzer {
       k.initialized = true;
       return measurement;
     }
+
+    // 적응형: 측정값이 현재 추정과 크게 다르면 프로세스 노이즈를 일시 증가
+    // → 급격한 호흡 변화에 빠르게 적응
+    var deviation = Math.abs(measurement - k.x);
+    var adaptiveQ = k.q;
+    if (deviation > 8) {
+      adaptiveQ = k.q * 10;  // 큰 변화 → 빠르게 추종
+    } else if (deviation > 4) {
+      adaptiveQ = k.q * 4;
+    }
+
     // 예측 단계
-    var p = k.p + k.q;
+    var p = k.p + adaptiveQ;
     // 업데이트 단계
     var gain = p / (p + k.r);
     k.x = k.x + gain * (measurement - k.x);
@@ -440,17 +451,18 @@ class BreathingAnalyzer {
     this._frameBrightness = avgR * 0.299 + avgG * 0.587 + avgB * 0.114;
     var brightness = avgR * 0.15 + avgG * 0.7 + avgB * 0.15; // 호환용
 
-    // === 4단계 모션 게이트 (가속도계 융합 추가) ===
+    // === 모션 게이트 (물리 흔들림 vs 호흡 신호 구분) ===
     var params = this.getParams();
-    var isShaking = false;
+    var physicalShake = false;  // 물리적 카메라 흔들림 (자이로/가속도)
+    var softMotion = false;     // 영상 기반 움직임 (호흡일 수도 있음)
 
-    // 1단계: 상보 필터 융합 모션 (자이로+가속도)
-    if (this._fusedMotion > 5) isShaking = true;
+    // 1단계: 상보 필터 융합 모션 (자이로+가속도) → 확실한 물리 흔들림
+    if (this._fusedMotion > 5) physicalShake = true;
 
-    // 2단계: 자이로 단독 (융합 불가 시 폴백)
-    if (!isShaking && this._gyroShakeLevel > 5) isShaking = true;
+    // 2단계: 자이로 단독 (융합 불가 시 폴백) → 확실한 물리 흔들림
+    if (!physicalShake && this._gyroShakeLevel > 5) physicalShake = true;
 
-    // 3단계: 광학 흐름
+    // 3단계: 광학 흐름 → 소프트 모션 (호흡일 수 있음)
     if (this._prevFrameData && this._prevFrameData.length === data.length) {
       var pixelShift = 0;
       var sampleStep = Math.max(4, Math.floor(data.length / 400)) * 4;
@@ -462,22 +474,28 @@ class BreathingAnalyzer {
       }
       if (sampleCount > 0) {
         pixelShift /= (sampleCount * 2);
-        if (pixelShift > 3) isShaking = true;
+        // 임계값 상향: 3 → 5 (빠른 호흡의 픽셀 변화는 보통 2~4)
+        if (pixelShift > 5) softMotion = true;
       }
     }
     this._prevFrameData = new Uint8ClampedArray(data);
 
-    // 4단계: 밝기 변화율
+    // 4단계: 밝기 변화율 → 소프트 모션
     if (this._prevBrightness !== null) {
       var change = Math.abs(brightness - this._prevBrightness) / (this._prevBrightness + 0.001);
-      if (change > params.motionThreshold) isShaking = true;
+      // 임계값의 2배 이상일 때만 (빠른 호흡은 보통 1~1.5배)
+      if (change > params.motionThreshold * 2) softMotion = true;
     }
 
     this._totalFrameCount++;
-    if (isShaking) {
+
+    // === 모션 판정: 물리 흔들림 vs 소프트 모션 차등 처리 ===
+    if (physicalShake) {
+      // 확실한 물리 흔들림 → 프레임 스킵 + 장기간 시 버퍼 리셋
       this._motionFrames++;
       this._prevBrightness = brightness;
-      if (this._motionFrames > 10) {
+      if (this._motionFrames > 30) {
+        // 30프레임(~1초) 연속 물리 흔들림 → 버퍼 리셋
         this._bufR = []; this._bufG = []; this._bufB = [];
         this.timestamps = [];
         this._motionFrames = 0;
@@ -485,6 +503,16 @@ class BreathingAnalyzer {
       }
       return this.lastValidBpm;
     }
+
+    if (softMotion && !physicalShake) {
+      // 영상 기반 움직임만 감지 → 프레임 스킵하되 버퍼는 유지
+      // (빠른 호흡이나 자세 변화일 수 있으므로 데이터 보존)
+      this._motionFrames++;
+      this._prevBrightness = brightness;
+      // 소프트 모션은 버퍼를 절대 삭제하지 않음 — 그냥 해당 프레임만 건너뜀
+      return this.lastValidBpm;
+    }
+
     this._motionFrames = 0;
     this._prevBrightness = brightness;
 
