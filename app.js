@@ -47,6 +47,7 @@
     manualRunning = true;
     manualStartTime = Date.now();
     tapTimes = [];
+    acquireWakeLock();
     manualBpm.textContent = '--';
     manualBpmCircle.className = 'bpm-circle active';
     manualStatusText.textContent = '보리가 숨 쉴 때마다 탭하세요';
@@ -154,6 +155,8 @@
   function finishManual() {
     var bpm = calcManualBpm();
     stopManual();
+    // 진동 피드백
+    if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
     if (bpm !== null && tapTimes.length >= 3) {
       var elapsed = Math.round((Date.now() - (manualStartTime || Date.now())) / 1000);
       showResultModal(bpm, elapsed, 'manual', tapTimes.length);
@@ -164,6 +167,7 @@
 
   function stopManual() {
     manualRunning = false;
+    releaseWakeLock();
     btnManualStop.classList.add('hidden');
     if (manualTimerId) { cancelAnimationFrame(manualTimerId); manualTimerId = null; }
   }
@@ -177,6 +181,20 @@
   var videoTrack = null;
   var isMeasuring = false;
   var animId = null;
+
+  // === Wake Lock (화면 꺼짐 방지) ===
+  var wakeLock = null;
+  function acquireWakeLock() {
+    if ('wakeLock' in navigator) {
+      navigator.wakeLock.request('screen').then(function(lock) {
+        wakeLock = lock;
+        wakeLock.addEventListener('release', function() { wakeLock = null; });
+      }).catch(function() {});
+    }
+  }
+  function releaseWakeLock() {
+    if (wakeLock) { wakeLock.release().catch(function() {}); wakeLock = null; }
+  }
   var autoTimerId = null;
   var autoBpmHistory = [];
   var currentAutoBpm = null;
@@ -444,6 +462,7 @@
     currentAutoBpm = null;
     analyzer.setSensitivity($('#sensitivity').value);
     analyzer.start();
+    acquireWakeLock();
 
     $('#btn-auto-measure').classList.add('hidden');
     $('#btn-roi').classList.add('hidden');
@@ -476,11 +495,13 @@
     if (displayBpm !== null) {
       $('#auto-bpm').textContent = displayBpm;
       $('#auto-bpm').className = 'bpm-number' + (displayBpm>=40?' danger':displayBpm>=30?' warning':'');
-      // 신뢰도 표시
+      // 신뢰도 + 분석 채널 표시
       var conf = analyzer.confidence || 0;
       var confLabel = conf >= 0.5 ? '높음' : conf >= 0.25 ? '보통' : '낮음';
       var statusText = displayBpm>=40?'위험! 즉시 내원!':displayBpm>=30?'주의':'정상 범위';
-      $('#auto-breath-status').textContent = statusText + ' (신뢰도: ' + confLabel + ')';
+      var chMap = { r: 'R', g: 'G', b: 'B' };
+      var chLabel = chMap[analyzer.debugInfo.channel] || 'G';
+      $('#auto-breath-status').textContent = statusText + ' (신뢰도: ' + confLabel + ' | CH:' + chLabel + ')';
     } else {
       var sec = analyzer.getElapsedSeconds();
       if (sec < 5) {
@@ -503,8 +524,13 @@
   function stopAutoMeasure(showResult) {
     isMeasuring = false;
     analyzer.stop();
+    releaseWakeLock();
     if (animId) { cancelAnimationFrame(animId); animId = null; }
     if (autoTimerId) { clearTimeout(autoTimerId); autoTimerId = null; }
+    // 진동 피드백: 측정 완료 알림 (iOS 18+)
+    if (showResult && navigator.vibrate) {
+      navigator.vibrate([100, 50, 100]);
+    }
 
     $('#btn-auto-stop').classList.add('hidden');
     $('#timer-display').classList.add('hidden');

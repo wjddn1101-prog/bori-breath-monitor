@@ -1,13 +1,13 @@
 /**
- * 보리 호흡 분석기 v4 — SRR (Sleeping Respiratory Rate)
+ * 보리 호흡 분석기 v5 — Enhanced SRR (Sleeping Respiratory Rate)
  *
- * 알고리즘:
- *   1. ROI 평균 밝기 추출 (녹색 채널 70% 가중)
- *   2. 슬라이딩 윈도우 + 선형 디트렌드
- *   3. 이동평균 스무딩 (밴드패스 효과)
- *   4. 자기상관(Autocorrelation)으로 호흡 주기 검출
- *   5. 피크 카운팅으로 교차 검증
- *   6. 모션 게이트: 급격한 밝기 변화 시 프레임 제외
+ * v4 → v5 개선사항:
+ *   1. FFT 주파수 분석 + 3중 교차 검증 (자기상관 + FFT + 피크)
+ *   2. 가속도계 + 자이로 상보 필터 융합 모션 보정
+ *   3. R/G/B 다중 채널 독립 분석 + 프레임 밝기 기반 자동 채널 선택
+ *   4. 칼만 필터 BPM 안정화
+ *   5. 적응형 밴드패스 필터 (0.1~1.5Hz)
+ *   6. Web Worker 비동기 분석 (메인 스레드 프레임 드랍 방지)
  *
  * SRR 기준: 가슴/배가 한 번 올라갔다 내려오면 = 1회 호흡
  * 정상 수면 호흡: 15~30회/분, 40회 이상 = 위험
@@ -21,9 +21,14 @@ class BreathingAnalyzer {
     this.isAnalyzing = false;
     this.startTime = null;
 
-    // 시그널 버퍼
-    this.rawBuffer = [];
+    // === 다중 채널 시그널 버퍼 ===
+    this._bufR = [];
+    this._bufG = [];
+    this._bufB = [];
     this.timestamps = [];
+    this._activeChannel = 'g';       // 자동 선택됨
+    this._channelSelectTime = 0;     // 마지막 채널 선택 시각
+    this._frameBrightness = 128;     // 프레임 평균 밝기 (조도 대용)
 
     // 결과
     this.lastValidBpm = null;
@@ -33,27 +38,40 @@ class BreathingAnalyzer {
     this._windowStartIdx = 0;
     this.nullCount = 0;
 
-    // 모션 게이트
+    // 분석 방법별 BPM (UI 디버그용)
+    this.debugInfo = { acBpm: null, fftBpm: null, peakBpm: null, channel: 'g' };
+
+    // === 모션 게이트 ===
     this._prevBrightness = null;
     this._motionFrames = 0;
+    this._prevFrameData = null;
 
-    // [신규] 손떨림 방지 시스템
-    this._prevFrameData = null;       // 이전 프레임 ROI 픽셀 (광학 흐름)
-    this._gyroShakeLevel = 0;         // 자이로스코프 흔들림 수치
-    this._gyroHandler = null;
-    this._lpfState = 0;               // 버터워스 로우패스 필터 상태
-    this._lpfInitialized = false;
+    // 자이로 + 가속도계 융합
+    this._gyroShakeLevel = 0;
+    this._accelShakeLevel = 0;
+    this._fusedMotion = 0;           // 상보 필터 융합값
+    this._motionHandler = null;
+
+    // === 적응형 밴드패스 필터 (채널별) ===
+    this._hpf = { r: { prevX: 0, prevY: 0 }, g: { prevX: 0, prevY: 0 }, b: { prevX: 0, prevY: 0 } };
+    this._lpf = { r: 0, g: 0, b: 0 };
+    this._bpfInitialized = false;
+
+    // === 칼만 필터 ===
+    this._kalman = { x: 0, p: 100, q: 0.5, r: 4, initialized: false };
+
+    // === Web Worker ===
+    this._worker = null;
+    this._workerBusy = false;
+    this._workerResult = null;
+    this._lastWorkerPost = 0;
+    this._initWorker();
+
+    // 분석 스로틀 (Worker 미사용 폴백)
+    this._lastAnalysisTime = 0;
   }
 
-  /**
-   * 감도별 파라미터
-   * - windowSec: 분석 윈도우 길이 (길수록 안정, 짧으면 반응 빠름)
-   * - smoothW: 스무딩 윈도우 (클수록 노이즈 제거, 작으면 민감)
-   * - minCycles: 최소 요구 호흡 사이클 수
-   * - acThreshold: 자기상관 피크 최소 높이 (낮을수록 관대)
-   * - motionThreshold: 모션 감지 임계값 (프레임간 밝기 변화율)
-   * - minBpm/maxBpm: BPM 허용 범위
-   */
+  // ========== 감도 파라미터 ==========
   getParams() {
     var p = {
       low:       { windowSec: 45, smoothW: 11, minCycles: 5, acThreshold: 0.30, motionThreshold: 0.08, minBpm: 6, maxBpm: 40 },
@@ -69,7 +87,9 @@ class BreathingAnalyzer {
   setSensitivity(s) { this.sensitivity = s; }
 
   start() {
-    this.rawBuffer = [];
+    this._bufR = [];
+    this._bufG = [];
+    this._bufB = [];
     this.timestamps = [];
     this.smoothedSignal = [];
     this.peaks = [];
@@ -81,107 +101,265 @@ class BreathingAnalyzer {
     this._prevBrightness = null;
     this._motionFrames = 0;
     this._prevFrameData = null;
-    this._lpfState = 0;
-    this._lpfInitialized = false;
+    this._bpfInitialized = false;
+    this._kalman = { x: 0, p: 100, q: 0.5, r: 4, initialized: false };
+    this._activeChannel = 'g';
+    this._channelSelectTime = 0;
+    this._workerResult = null;
+    this._workerBusy = false;
+    this._lastWorkerPost = 0;
+    this._lastAnalysisTime = 0;
+    this.debugInfo = { acBpm: null, fftBpm: null, peakBpm: null, channel: 'g' };
 
-    // [신규] 자이로스코프 손떨림 감지 시작
-    this._startGyro();
+    this._startMotionSensors();
   }
 
   stop() {
     this.isAnalyzing = false;
-    this._stopGyro();
-  }
-
-  // === 자이로스코프 기반 물리적 손떨림 감지 ===
-  _startGyro() {
-    this._gyroShakeLevel = 0;
-    if (window.DeviceMotionEvent) {
-      this._gyroHandler = (event) => {
-        var r = event.rotationRate;
-        if (r) {
-          // 초당 회전 각속도 크기 (deg/s) — 손떨림은 보통 5~50 deg/s
-          var magnitude = Math.sqrt((r.alpha||0)**2 + (r.beta||0)**2 + (r.gamma||0)**2);
-          // 지수 이동평균으로 부드럽게 추적
-          this._gyroShakeLevel = this._gyroShakeLevel * 0.7 + magnitude * 0.3;
-        }
-      };
-      window.addEventListener('devicemotion', this._gyroHandler);
-    }
-  }
-
-  _stopGyro() {
-    if (this._gyroHandler) {
-      window.removeEventListener('devicemotion', this._gyroHandler);
-      this._gyroHandler = null;
-    }
+    this._stopMotionSensors();
   }
 
   getElapsedSeconds() {
     return this.startTime ? Math.round((Date.now() - this.startTime) / 1000) : 0;
   }
 
-  /**
-   * 매 프레임 호출 — 비디오에서 ROI 밝기 추출 후 분석
-   */
+  // ========== Web Worker 초기화 ==========
+  _initWorker() {
+    try {
+      this._worker = new Worker('analysis-worker.js');
+      this._worker.onmessage = (e) => {
+        this._workerBusy = false;
+        this._workerResult = e.data;
+      };
+      this._worker.onerror = () => {
+        this._worker = null;  // Worker 실패 시 메인 스레드 폴백
+      };
+    } catch (e) {
+      this._worker = null;
+    }
+  }
+
+  // ========== 가속도계 + 자이로 상보 필터 융합 ==========
+  _startMotionSensors() {
+    this._gyroShakeLevel = 0;
+    this._accelShakeLevel = 0;
+    this._fusedMotion = 0;
+
+    if (!window.DeviceMotionEvent) return;
+
+    // iOS 13+ 권한 요청
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      DeviceMotionEvent.requestPermission().then((state) => {
+        if (state === 'granted') this._bindMotionHandler();
+      }).catch(() => {});
+    } else {
+      this._bindMotionHandler();
+    }
+  }
+
+  _bindMotionHandler() {
+    this._motionHandler = (event) => {
+      // 자이로스코프: 회전 각속도 (deg/s)
+      var r = event.rotationRate;
+      if (r) {
+        var gyroMag = Math.sqrt((r.alpha || 0) ** 2 + (r.beta || 0) ** 2 + (r.gamma || 0) ** 2);
+        this._gyroShakeLevel = this._gyroShakeLevel * 0.7 + gyroMag * 0.3;
+      }
+
+      // 가속도계: 선형 가속도 (중력 제외)
+      var a = event.acceleration;
+      if (a) {
+        var accelMag = Math.sqrt((a.x || 0) ** 2 + (a.y || 0) ** 2 + (a.z || 0) ** 2);
+        this._accelShakeLevel = this._accelShakeLevel * 0.7 + accelMag * 0.3;
+      }
+
+      // 상보 필터 융합: 자이로 60% + 가속도 40%
+      // 자이로는 빠른 회전(손목 떨림)에 강하고, 가속도는 병진 움직임에 강함
+      this._fusedMotion = this._gyroShakeLevel * 0.6 + this._accelShakeLevel * 0.4 * 10;
+    };
+    window.addEventListener('devicemotion', this._motionHandler);
+  }
+
+  _stopMotionSensors() {
+    if (this._motionHandler) {
+      window.removeEventListener('devicemotion', this._motionHandler);
+      this._motionHandler = null;
+    }
+  }
+
+  // ========== 적응형 밴드패스 필터 ==========
+  // 고역 통과 (0.1Hz) + 저역 통과 (1.5Hz) 캐스케이드
+  _bandpassFilter(value, channel, dt) {
+    if (dt <= 0 || dt > 1) dt = 0.033;
+
+    var hpState = this._hpf[channel];
+
+    // 고역 통과: fc = 0.1Hz → 느린 조명 드리프트 제거
+    var rcHp = 1.0 / (2 * Math.PI * 0.1);
+    var alphaHp = rcHp / (rcHp + dt);
+    var hpOut = alphaHp * (hpState.prevY + value - hpState.prevX);
+    hpState.prevX = value;
+    hpState.prevY = hpOut;
+
+    // 저역 통과: fc = 1.5Hz → 손떨림/노이즈 제거
+    var rcLp = 1.0 / (2 * Math.PI * 1.5);
+    var alphaLp = dt / (rcLp + dt);
+    this._lpf[channel] += alphaLp * (hpOut - this._lpf[channel]);
+
+    return this._lpf[channel];
+  }
+
+  // ========== 다중 채널 자동 선택 ==========
+  // 프레임 밝기(조도 대용) + 채널별 SNR로 최적 채널 결정
+  _autoSelectChannel(now) {
+    // 3초마다 재평가
+    if (now - this._channelSelectTime < 3000) return;
+    this._channelSelectTime = now;
+
+    var minLen = 60;  // 최소 2초 분량
+    if (this._bufR.length < minLen) return;
+
+    var recent = minLen;
+    var channels = {
+      r: this._bufR.slice(-recent),
+      g: this._bufG.slice(-recent),
+      b: this._bufB.slice(-recent)
+    };
+
+    var bestChannel = 'g';
+    var bestScore = -1;
+
+    for (var ch in channels) {
+      var buf = channels[ch];
+      // 디트렌드 후 분산 계산 = 신호 에너지 (SNR 대용)
+      var n = buf.length;
+      var sx = 0, sy = 0, sxy = 0, sx2 = 0;
+      for (var i = 0; i < n; i++) { sx += i; sy += buf[i]; sxy += i * buf[i]; sx2 += i * i; }
+      var denom = n * sx2 - sx * sx;
+      var slope = Math.abs(denom) > 1e-10 ? (n * sxy - sx * sy) / denom : 0;
+      var intercept = (sy - slope * sx) / n;
+
+      var variance = 0;
+      for (var i = 0; i < n; i++) {
+        var d = buf[i] - (slope * i + intercept);
+        variance += d * d;
+      }
+      variance /= n;
+
+      // 조명 환경 가중치 (프레임 밝기 기반 = 조도센서 대체)
+      var weight = 1.0;
+      if (this._frameBrightness < 60) {
+        // 어두운 환경: 카메라가 게인을 올림 → R채널 SNR 우수
+        if (ch === 'r') weight = 1.4;
+        else if (ch === 'g') weight = 1.0;
+        else weight = 0.7;
+      } else if (this._frameBrightness < 150) {
+        // 실내 보통 조명: G채널 최적 (베이어 필터 2x 픽셀)
+        if (ch === 'g') weight = 1.3;
+        else if (ch === 'r') weight = 1.0;
+        else weight = 0.8;
+      } else {
+        // 밝은 환경: G채널 여전히 우수, 포화 시 B 고려
+        if (ch === 'g') weight = 1.2;
+        else if (ch === 'b') weight = 1.1;
+        else weight = 1.0;
+      }
+
+      var score = variance * weight;
+      if (score > bestScore) {
+        bestScore = score;
+        bestChannel = ch;
+      }
+    }
+
+    this._activeChannel = bestChannel;
+    this.debugInfo.channel = bestChannel;
+  }
+
+  // ========== 칼만 필터 ==========
+  _kalmanUpdate(measurement) {
+    var k = this._kalman;
+    if (!k.initialized) {
+      k.x = measurement;
+      k.p = 10;
+      k.initialized = true;
+      return measurement;
+    }
+    // 예측 단계
+    var p = k.p + k.q;
+    // 업데이트 단계
+    var gain = p / (p + k.r);
+    k.x = k.x + gain * (measurement - k.x);
+    k.p = (1 - gain) * p;
+    return Math.round(k.x);
+  }
+
+  // ========== 매 프레임: 데이터 수집 + 분석 ==========
   analyzeFrame(video) {
     if (!this.isAnalyzing || !this.roi) return this.lastValidBpm;
     var vw = video.videoWidth, vh = video.videoHeight;
     if (!vw || !vh) return this.lastValidBpm;
 
-    // 프레임 캡처 (성능을 위해 축소)
+    var now = Date.now();
+
+    // 프레임 캡처 (성능 축소)
     var scale = Math.min(1, 240 / vw);
     var cw = Math.round(vw * scale), ch = Math.round(vh * scale);
     this.canvas.width = cw;
     this.canvas.height = ch;
     this.ctx.drawImage(video, 0, 0, cw, ch);
 
-    // ROI 영역 픽셀 추출
+    // ROI 픽셀 추출
     var rx = Math.max(0, Math.round(this.roi.x * cw));
     var ry = Math.max(0, Math.round(this.roi.y * ch));
     var rw = Math.max(1, Math.min(Math.round(this.roi.w * cw), cw - rx));
     var rh = Math.max(1, Math.min(Math.round(this.roi.h * ch), ch - ry));
-
     var data = this.ctx.getImageData(rx, ry, rw, rh).data;
-    var total = 0;
-    var count = data.length / 4;
-    for (var i = 0; i < data.length; i += 4) {
-      // 녹색 채널 가중치 — 카메라 센서에서 SNR 최적
-      total += data[i] * 0.15 + data[i+1] * 0.7 + data[i+2] * 0.15;
-    }
-    var brightness = total / count;
-    var now = Date.now();
+    var pixelCount = data.length / 4;
 
-    // === 강화된 3단계 모션 게이트 ===
+    // === R/G/B 채널별 평균 밝기 추출 ===
+    var totalR = 0, totalG = 0, totalB = 0;
+    for (var i = 0; i < data.length; i += 4) {
+      totalR += data[i];
+      totalG += data[i + 1];
+      totalB += data[i + 2];
+    }
+    var avgR = totalR / pixelCount;
+    var avgG = totalG / pixelCount;
+    var avgB = totalB / pixelCount;
+
+    // 프레임 전체 밝기 (조도센서 대체)
+    this._frameBrightness = avgR * 0.299 + avgG * 0.587 + avgB * 0.114;
+    var brightness = avgR * 0.15 + avgG * 0.7 + avgB * 0.15; // 호환용
+
+    // === 4단계 모션 게이트 (가속도계 융합 추가) ===
     var params = this.getParams();
     var isShaking = false;
 
-    // 1단계: 자이로스코프 물리 떨림 감지 (5 deg/s 이상 = 손떨림)
-    if (this._gyroShakeLevel > 5) {
-      isShaking = true;
-    }
+    // 1단계: 상보 필터 융합 모션 (자이로+가속도)
+    if (this._fusedMotion > 5) isShaking = true;
 
-    // 2단계: 광학 흐름 — ROI 픽셀 이동량 추적
-    var currentFrameData = data;
+    // 2단계: 자이로 단독 (융합 불가 시 폴백)
+    if (!isShaking && this._gyroShakeLevel > 5) isShaking = true;
+
+    // 3단계: 광학 흐름
     if (this._prevFrameData && this._prevFrameData.length === data.length) {
       var pixelShift = 0;
-      var sampleStep = Math.max(4, Math.floor(data.length / 400)) * 4; // 100개 샘플
+      var sampleStep = Math.max(4, Math.floor(data.length / 400)) * 4;
       var sampleCount = 0;
       for (var fi = 0; fi < data.length && fi < this._prevFrameData.length; fi += sampleStep) {
         pixelShift += Math.abs(data[fi] - this._prevFrameData[fi]);
-        pixelShift += Math.abs(data[fi+1] - this._prevFrameData[fi+1]);
+        pixelShift += Math.abs(data[fi + 1] - this._prevFrameData[fi + 1]);
         sampleCount++;
       }
       if (sampleCount > 0) {
         pixelShift /= (sampleCount * 2);
-        // 평균 픽셀 변화가 3 이상이면 카메라 움직임 감지
         if (pixelShift > 3) isShaking = true;
       }
     }
-    // 현재 프레임 저장 (복사)
     this._prevFrameData = new Uint8ClampedArray(data);
 
-    // 3단계: 밝기 변화율 (기존 방식 유지)
+    // 4단계: 밝기 변화율
     if (this._prevBrightness !== null) {
       var change = Math.abs(brightness - this._prevBrightness) / (this._prevBrightness + 0.001);
       if (change > params.motionThreshold) isShaking = true;
@@ -191,266 +369,402 @@ class BreathingAnalyzer {
       this._motionFrames++;
       this._prevBrightness = brightness;
       if (this._motionFrames > 10) {
-        this.rawBuffer = [];
+        this._bufR = []; this._bufG = []; this._bufB = [];
         this.timestamps = [];
         this._motionFrames = 0;
+        this._bpfInitialized = false;
       }
       return this.lastValidBpm;
     }
     this._motionFrames = 0;
     this._prevBrightness = brightness;
 
-    // [신규] 버터워스 로우패스 필터 (1.5Hz 차단 = 90BPM 이상 차단)
-    // 손떨림(3~10Hz)을 완벽히 제거하면서 호흡 신호(0.1~1.5Hz)만 통과
-    if (!this._lpfInitialized) {
-      this._lpfState = brightness;
-      this._lpfInitialized = true;
-    }
-    // 프레임간 시간차 기반 적응형 알파 계산
+    // === 적응형 밴드패스 필터 (채널별 독립) ===
     var dt = this.timestamps.length > 0 ? (now - this.timestamps[this.timestamps.length - 1]) / 1000 : 0.033;
-    var cutoffHz = 1.5; // 차단 주파수: 1.5Hz (= 분당 90회)
-    var rc = 1.0 / (2 * Math.PI * cutoffHz);
-    var alpha = dt / (rc + dt);
-    this._lpfState += alpha * (brightness - this._lpfState);
 
-    // 필터링된 신호를 버퍼에 추가
-    this.rawBuffer.push(this._lpfState);
+    if (!this._bpfInitialized) {
+      this._hpf = {
+        r: { prevX: avgR, prevY: 0 },
+        g: { prevX: avgG, prevY: 0 },
+        b: { prevX: avgB, prevY: 0 }
+      };
+      this._lpf = { r: 0, g: 0, b: 0 };
+      this._bpfInitialized = true;
+    }
+
+    var filtR = this._bandpassFilter(avgR, 'r', dt);
+    var filtG = this._bandpassFilter(avgG, 'g', dt);
+    var filtB = this._bandpassFilter(avgB, 'b', dt);
+
+    this._bufR.push(filtR);
+    this._bufG.push(filtG);
+    this._bufB.push(filtB);
     this.timestamps.push(now);
 
     // 버퍼 최대 90초분 유지
     while (this.timestamps.length > 0 && now - this.timestamps[0] > 90000) {
-      this.rawBuffer.shift();
+      this._bufR.shift(); this._bufG.shift(); this._bufB.shift();
       this.timestamps.shift();
     }
 
     // 최소 5초 데이터 필요
-    if (now - this.timestamps[0] < 5000 || this.rawBuffer.length < 40) {
+    if (now - this.timestamps[0] < 5000 || this.timestamps.length < 40) {
       return this.lastValidBpm;
     }
 
-    // 분석 실행
-    var bpm = this._analyzeWindow();
+    // === 자동 채널 선택 (3초 간격) ===
+    this._autoSelectChannel(now);
 
+    // === 분석 실행 (Worker 또는 메인 스레드) ===
+    var activeBuffer = this._activeChannel === 'r' ? this._bufR :
+                       this._activeChannel === 'b' ? this._bufB : this._bufG;
+
+    // Worker 사용: 300ms 간격으로 비동기 분석
+    if (this._worker && !this._workerBusy && now - this._lastWorkerPost > 300) {
+      var windowMs = params.windowSec * 1000;
+      var startIdx = 0;
+      for (var i = this.timestamps.length - 1; i >= 0; i--) {
+        if (now - this.timestamps[i] > windowMs) { startIdx = i + 1; break; }
+      }
+
+      var sig = activeBuffer.slice(startIdx);
+      var ts = this.timestamps.slice(startIdx);
+      if (sig.length >= 30) {
+        this._workerBusy = true;
+        this._lastWorkerPost = now;
+        this._workerStartIdx = startIdx;
+        this._worker.postMessage({ signal: sig, timestamps: ts, params: params, fps: sig.length / ((ts[ts.length - 1] - ts[0]) / 1000) });
+      }
+    }
+
+    // Worker 결과 수신 시 처리
+    if (this._workerResult) {
+      var wr = this._workerResult;
+      this._workerResult = null;
+      return this._processAnalysisResult(wr);
+    }
+
+    // Worker 없거나 아직 응답 안 왔으면 — 메인 스레드 폴백 (500ms 간격)
+    if (!this._worker && now - this._lastAnalysisTime > 500) {
+      this._lastAnalysisTime = now;
+      var bpm = this._analyzeWindow(activeBuffer);
+      return this._processResult(bpm);
+    }
+
+    return this.lastValidBpm;
+  }
+
+  // Worker 결과 처리
+  _processAnalysisResult(wr) {
+    if (wr.smoothedSignal) this.smoothedSignal = wr.smoothedSignal;
+    if (wr.peaks) {
+      this.peaks = [];
+      var offset = this._workerStartIdx || 0;
+      for (var i = 0; i < wr.peaks.length; i++) this.peaks.push(wr.peaks[i] + offset);
+    }
+    this.debugInfo.acBpm = wr.acBpm;
+    this.debugInfo.fftBpm = wr.fftBpm;
+    this.debugInfo.peakBpm = wr.peakBpm;
+
+    if (wr.confidence) this.confidence = wr.confidence;
+
+    return this._processResult(wr.bpm);
+  }
+
+  // BPM 결과 → 칼만 필터 → 반환
+  _processResult(bpm) {
     if (bpm !== null) {
+      bpm = this._kalmanUpdate(bpm);
       this.lastValidBpm = bpm;
       this.nullCount = 0;
       return bpm;
     } else {
       this.nullCount++;
-      if (this.nullCount > 90) {
-        this.lastValidBpm = null;
-      }
+      if (this.nullCount > 90) this.lastValidBpm = null;
       return this.lastValidBpm;
     }
   }
 
-  /**
-   * 슬라이딩 윈도우 분석 — 자기상관 + 피크 카운팅
-   */
-  _analyzeWindow() {
+  // ========== 메인 스레드 분석 (Worker 폴백) ==========
+  _analyzeWindow(activeBuffer) {
     var params = this.getParams();
     var now = this.timestamps[this.timestamps.length - 1];
     var windowMs = params.windowSec * 1000;
 
-    // 최근 windowSec 초 데이터 추출
     var startIdx = 0;
     for (var i = this.timestamps.length - 1; i >= 0; i--) {
       if (now - this.timestamps[i] > windowMs) { startIdx = i + 1; break; }
     }
 
-    var sig = this.rawBuffer.slice(startIdx);
+    var sig = activeBuffer.slice(startIdx);
     var ts = this.timestamps.slice(startIdx);
     if (sig.length < 30) return null;
 
-    // 실효 fps 계산
     var duration = (ts[ts.length - 1] - ts[0]) / 1000;
     if (duration < 3) return null;
     var fps = sig.length / duration;
 
-    // 1. 선형 트렌드 제거 (조명 변화 보정)
+    // 1. 디트렌드
     var detrended = this._detrend(sig);
 
-    // 2. 이동평균 스무딩 (고주파 노이즈 제거)
+    // 2. 스무딩
     var smoothed = this._smooth(detrended, params.smoothW);
 
-    // 3. 정규화 (-1 ~ +1)
+    // 3. 정규화
     var maxAbs = 0;
     for (var i = 0; i < smoothed.length; i++) {
       var a = Math.abs(smoothed[i]);
       if (a > maxAbs) maxAbs = a;
     }
     if (maxAbs < 0.0001) return null;
-    var norm = [];
-    for (var i = 0; i < smoothed.length; i++) {
-      norm.push(smoothed[i] / maxAbs);
-    }
+    var norm = new Array(smoothed.length);
+    for (var i = 0; i < smoothed.length; i++) norm[i] = smoothed[i] / maxAbs;
 
-    // UI용 저장
     this.smoothedSignal = norm;
     this._windowStartIdx = startIdx;
 
-    // 4. 자기상관(Autocorrelation)으로 호흡 주기 검출
-    // 한 번 오르내림(1회 호흡) = 시그널의 1주기 = 자기상관 첫 번째 피크
+    // 4. 자기상관
     var minLag = Math.max(2, Math.round(fps * 60 / params.maxBpm));
     var maxLag = Math.min(Math.floor(norm.length / 2), Math.round(fps * 60 / params.minBpm));
-
     var acResult = this._autocorrelation(norm, minLag, maxLag);
 
-    // 5. 피크 카운팅 (교차 검증용)
+    // 5. FFT
+    var fftResult = this._fftAnalysis(norm, fps, params);
+
+    // 6. 피크 카운팅
     var peakIndices = this._findPeaks(norm, fps, params);
     this.peaks = [];
-    for (var i = 0; i < peakIndices.length; i++) {
-      this.peaks.push(peakIndices[i] + startIdx);
-    }
+    for (var i = 0; i < peakIndices.length; i++) this.peaks.push(peakIndices[i] + startIdx);
     var peakBpm = this._bpmFromPeaks(peakIndices, ts, params);
 
-    // 6. 결과 결정 — 자기상관 우선, 피크로 검증
-    var acBpm = null;
+    // BPM 추출
+    var acBpm = null, acConf = 0;
     if (acResult) {
-      var period = acResult.lag / fps;
-      acBpm = Math.round(60 / period);
-      this.confidence = acResult.confidence;
+      acBpm = Math.round(60 / (acResult.lag / fps));
+      acConf = acResult.confidence;
     }
+    var fftBpm = fftResult ? fftResult.bpm : null;
+    var fftConf = fftResult ? fftResult.confidence : 0;
+
+    this.debugInfo.acBpm = acBpm;
+    this.debugInfo.fftBpm = fftBpm;
+    this.debugInfo.peakBpm = peakBpm;
+
+    // 7. 3중 교차 검증
+    return this._crossValidate(acBpm, acConf, fftBpm, fftConf, peakBpm, params, duration);
+  }
+
+  // ========== 3중 교차 검증 ==========
+  _crossValidate(acBpm, acConf, fftBpm, fftConf, peakBpm, params, duration) {
+    var candidates = [];
+    if (acBpm !== null && acBpm >= params.minBpm && acBpm <= params.maxBpm) {
+      candidates.push({ bpm: acBpm, conf: acConf, weight: 3 });
+    }
+    if (fftBpm !== null && fftBpm >= params.minBpm && fftBpm <= params.maxBpm) {
+      candidates.push({ bpm: fftBpm, conf: fftConf, weight: 2 });
+    }
+    if (peakBpm !== null && peakBpm >= params.minBpm && peakBpm <= params.maxBpm) {
+      candidates.push({ bpm: peakBpm, conf: 0.3, weight: 1 });
+    }
+
+    if (candidates.length === 0) return null;
 
     // 최소 사이클 수 확인
-    var minCyclesOk = true;
-    if (acBpm !== null) {
-      var expectedCycles = duration / (60 / acBpm);
-      if (expectedCycles < params.minCycles) minCyclesOk = false;
+    for (var i = 0; i < candidates.length; i++) {
+      var expectedCycles = duration / (60 / candidates[i].bpm);
+      if (expectedCycles < params.minCycles) candidates[i].conf *= 0.5;
     }
 
-    // 판정 로직
-    if (acBpm !== null && peakBpm !== null) {
-      // 둘 다 있으면 — 일치 여부 확인
-      var diff = Math.abs(acBpm - peakBpm) / Math.max(acBpm, 1);
-      if (diff < 0.25 && minCyclesOk) {
-        // 잘 일치 — 자기상관 결과 사용 (더 안정적)
-        return this._clampBpm(acBpm, params);
-      } else if (acResult && acResult.confidence >= params.acThreshold && minCyclesOk) {
-        // 자기상관 신뢰도 높으면 자기상관 우선
-        return this._clampBpm(acBpm, params);
-      } else {
-        // 불일치 — 피크 결과 사용
-        return this._clampBpm(peakBpm, params);
+    // 2개 이상 일치 (±20%) 찾기
+    if (candidates.length >= 2) {
+      var bestAgreement = null;
+      for (var i = 0; i < candidates.length; i++) {
+        for (var j = i + 1; j < candidates.length; j++) {
+          var avg = (candidates[i].bpm + candidates[j].bpm) / 2;
+          var diff = Math.abs(candidates[i].bpm - candidates[j].bpm) / Math.max(avg, 1);
+          if (diff < 0.2) {
+            var wTotal = candidates[i].weight + candidates[j].weight;
+            var wBpm = Math.round((candidates[i].bpm * candidates[i].weight + candidates[j].bpm * candidates[j].weight) / wTotal);
+            var wConf = Math.max(candidates[i].conf, candidates[j].conf);
+            var bonus = candidates.length >= 3 ? 1.15 : 1.1;
+            var fConf = Math.min(1, wConf * bonus);
+            if (!bestAgreement || fConf > bestAgreement.conf) {
+              bestAgreement = { bpm: wBpm, conf: fConf };
+            }
+          }
+        }
       }
-    } else if (acBpm !== null && acResult && acResult.confidence >= params.acThreshold && minCyclesOk) {
-      return this._clampBpm(acBpm, params);
-    } else if (peakBpm !== null) {
-      this.confidence = 0.3; // 피크만으로는 신뢰도 낮음
-      return this._clampBpm(peakBpm, params);
+      if (bestAgreement) {
+        this.confidence = bestAgreement.conf;
+        return bestAgreement.bpm;
+      }
     }
 
-    return null;
+    // 일치 없음 — 최고 신뢰도 후보
+    candidates.sort(function(a, b) { return (b.conf * b.weight) - (a.conf * a.weight); });
+    this.confidence = candidates[0].conf;
+    return candidates[0].bpm;
   }
 
-  _clampBpm(bpm, params) {
-    if (bpm >= params.minBpm && bpm <= params.maxBpm) return bpm;
-    return null;
+  // ========== FFT 주파수 분석 ==========
+  _fftAnalysis(norm, fps, params) {
+    // 2의 거듭제곱 제로패딩
+    var n = 1;
+    while (n < norm.length) n <<= 1;
+
+    var re = new Array(n);
+    var im = new Array(n);
+    for (var i = 0; i < n; i++) {
+      re[i] = i < norm.length ? norm[i] : 0;
+      im[i] = 0;
+    }
+
+    this._fft(re, im, n);
+
+    // 파워 스펙트럼에서 호흡 주파수 대역 피크 찾기
+    var freqRes = fps / n;
+    var minFreq = params.minBpm / 60;
+    var maxFreq = params.maxBpm / 60;
+    var minBin = Math.max(1, Math.floor(minFreq / freqRes));
+    var maxBin = Math.min(n / 2, Math.ceil(maxFreq / freqRes));
+
+    var bestPower = 0, bestBin = 0, totalPower = 0;
+    for (var i = minBin; i <= maxBin; i++) {
+      var power = re[i] * re[i] + im[i] * im[i];
+      totalPower += power;
+      if (power > bestPower) { bestPower = power; bestBin = i; }
+    }
+
+    if (bestBin === 0 || totalPower < 0.0001) return null;
+
+    // 이차 보간으로 주파수 정밀도 향상
+    var precBin = bestBin;
+    if (bestBin > minBin && bestBin < maxBin) {
+      var p0 = re[bestBin - 1] * re[bestBin - 1] + im[bestBin - 1] * im[bestBin - 1];
+      var p1 = bestPower;
+      var p2 = re[bestBin + 1] * re[bestBin + 1] + im[bestBin + 1] * im[bestBin + 1];
+      var denom = p0 - 2 * p1 + p2;
+      if (Math.abs(denom) > 0.0001) {
+        precBin = bestBin + 0.5 * (p0 - p2) / denom;
+      }
+    }
+
+    var peakFreq = precBin * freqRes;
+    var bpm = Math.round(peakFreq * 60);
+    var confidence = bestPower / (totalPower + 0.0001);
+
+    if (bpm < params.minBpm || bpm > params.maxBpm) return null;
+    return { bpm: bpm, confidence: Math.min(1, confidence * 3) };
   }
 
-  /**
-   * 자기상관 함수 — 호흡 주기의 반복성을 검출
-   * 가슴이 올라갔다 내려오는 1주기가 반복되면 해당 주기 lag에서 피크 발생
-   */
+  // Radix-2 FFT (in-place)
+  _fft(re, im, n) {
+    for (var i = 1, j = 0; i < n; i++) {
+      var bit = n >> 1;
+      while (j & bit) { j ^= bit; bit >>= 1; }
+      j ^= bit;
+      if (i < j) {
+        var t = re[i]; re[i] = re[j]; re[j] = t;
+        t = im[i]; im[i] = im[j]; im[j] = t;
+      }
+    }
+    for (var len = 2; len <= n; len <<= 1) {
+      var ang = -2 * Math.PI / len;
+      var wRe = Math.cos(ang), wIm = Math.sin(ang);
+      for (var i = 0; i < n; i += len) {
+        var curRe = 1, curIm = 0;
+        for (var j = 0; j < len / 2; j++) {
+          var uRe = re[i + j], uIm = im[i + j];
+          var vRe = re[i + j + len / 2] * curRe - im[i + j + len / 2] * curIm;
+          var vIm = re[i + j + len / 2] * curIm + im[i + j + len / 2] * curRe;
+          re[i + j] = uRe + vRe;
+          im[i + j] = uIm + vIm;
+          re[i + j + len / 2] = uRe - vRe;
+          im[i + j + len / 2] = uIm - vIm;
+          var tRe = curRe * wRe - curIm * wIm;
+          curIm = curRe * wIm + curIm * wRe;
+          curRe = tRe;
+        }
+      }
+    }
+  }
+
+  // ========== 기존 메서드 (유지) ==========
   _autocorrelation(signal, minLag, maxLag) {
     var n = signal.length;
     if (maxLag >= n / 2 || minLag >= maxLag) return null;
 
-    // 평균 제거
     var mean = 0;
     for (var i = 0; i < n; i++) mean += signal[i];
     mean /= n;
 
-    var centered = [];
-    for (var i = 0; i < n; i++) centered.push(signal[i] - mean);
+    var centered = new Array(n);
+    for (var i = 0; i < n; i++) centered[i] = signal[i] - mean;
 
-    // 분산 (lag=0 자기상관)
     var variance = 0;
     for (var i = 0; i < n; i++) variance += centered[i] * centered[i];
     if (variance < 0.0001) return null;
 
-    // 자기상관 계산 + 첫 번째 유의미한 피크 찾기
-    var bestLag = 0;
-    var bestVal = -1;
-    var values = [];
+    var bestLag = 0, bestVal = -1;
+    var values = new Array(maxLag - minLag + 1);
 
     for (var lag = minLag; lag <= maxLag; lag++) {
       var sum = 0;
-      for (var j = 0; j < n - lag; j++) {
-        sum += centered[j] * centered[j + lag];
-      }
-      var acVal = sum / variance;
-      values.push(acVal);
+      for (var j = 0; j < n - lag; j++) sum += centered[j] * centered[j + lag];
+      values[lag - minLag] = sum / variance;
     }
 
-    // 피크 찾기 (3포인트 극대점)
     for (var i = 1; i < values.length - 1; i++) {
-      if (values[i] > values[i-1] && values[i] > values[i+1] && values[i] > bestVal) {
+      if (values[i] > values[i - 1] && values[i] > values[i + 1] && values[i] > bestVal) {
         bestVal = values[i];
         bestLag = minLag + i;
-        break; // 첫 번째 유의미한 피크만 사용 (기본 주기)
+        break;
       }
     }
 
     if (bestLag === 0 || bestVal < 0.05) return null;
-
     return { lag: bestLag, confidence: Math.min(1, bestVal) };
   }
 
-  /**
-   * 피크 검출 — 시그널에서 호흡 꼭대기(가슴 최고점) 찾기
-   */
   _findPeaks(norm, fps, params) {
     var peaks = [];
-    // 최소 피크 간격 (BPM 상한에서 계산)
     var minDist = Math.max(2, Math.round(fps * 60 / params.maxBpm * 0.7));
 
-    // 적응형 임계값: 시그널 에너지 기반
     var energy = 0;
     for (var i = 0; i < norm.length; i++) energy += norm[i] * norm[i];
     energy /= norm.length;
     var threshold = Math.max(0.05, Math.sqrt(energy) * 0.3);
 
     for (var i = 2; i < norm.length - 2; i++) {
-      // 5포인트 극대점
-      if (norm[i] > norm[i-1] && norm[i] > norm[i-2] &&
-          norm[i] > norm[i+1] && norm[i] > norm[i+2] &&
+      if (norm[i] > norm[i - 1] && norm[i] > norm[i - 2] &&
+          norm[i] > norm[i + 1] && norm[i] > norm[i + 2] &&
           norm[i] >= threshold) {
-        if (!peaks.length || (i - peaks[peaks.length-1]) >= minDist) {
+        if (!peaks.length || (i - peaks[peaks.length - 1]) >= minDist) {
           peaks.push(i);
-        } else if (norm[i] > norm[peaks[peaks.length-1]]) {
-          // 더 높은 피크로 교체
-          peaks[peaks.length-1] = i;
+        } else if (norm[i] > norm[peaks[peaks.length - 1]]) {
+          peaks[peaks.length - 1] = i;
         }
       }
     }
     return peaks;
   }
 
-  /**
-   * 피크 간격에서 BPM 계산 (이상치 제거 포함)
-   */
   _bpmFromPeaks(peakIndices, ts, params) {
     if (peakIndices.length < 2) return null;
 
-    // 피크 간 실제 시간 간격 (ms)
     var intervals = [];
     for (var i = 1; i < peakIndices.length; i++) {
-      var dt = ts[peakIndices[i]] - ts[peakIndices[i-1]];
+      var dt = ts[peakIndices[i]] - ts[peakIndices[i - 1]];
       if (dt > 0) intervals.push(dt);
     }
-
     if (intervals.length < 1) return null;
 
-    // 이상치 제거 (중앙값 기준 ±50%)
     if (intervals.length >= 3) {
-      var sorted = intervals.slice().sort(function(a,b){ return a-b; });
+      var sorted = intervals.slice().sort(function(a, b) { return a - b; });
       var median = sorted[Math.floor(sorted.length / 2)];
       var filtered = [];
       for (var i = 0; i < intervals.length; i++) {
-        if (intervals[i] > median * 0.5 && intervals[i] < median * 1.5) {
-          filtered.push(intervals[i]);
-        }
+        if (intervals[i] > median * 0.5 && intervals[i] < median * 1.5) filtered.push(intervals[i]);
       }
       if (filtered.length >= 1) {
         var avg = 0;
@@ -460,48 +774,39 @@ class BreathingAnalyzer {
       }
     }
 
-    // 이상치 제거 불가 시 단순 계산
-    var totalDur = ts[peakIndices[peakIndices.length-1]] - ts[peakIndices[0]];
+    var totalDur = ts[peakIndices[peakIndices.length - 1]] - ts[peakIndices[0]];
     if (totalDur <= 0) return null;
     return Math.round(60000 / (totalDur / (peakIndices.length - 1)));
   }
 
-  // 선형 트렌드 제거 (최소자승법)
   _detrend(sig) {
     var n = sig.length;
     var sx = 0, sy = 0, sxy = 0, sx2 = 0;
-    for (var i = 0; i < n; i++) {
-      sx += i; sy += sig[i]; sxy += i * sig[i]; sx2 += i * i;
-    }
+    for (var i = 0; i < n; i++) { sx += i; sy += sig[i]; sxy += i * sig[i]; sx2 += i * i; }
     var denom = n * sx2 - sx * sx;
     if (Math.abs(denom) < 1e-10) {
       var avg = sy / n;
-      var out = [];
-      for (var i = 0; i < n; i++) out.push(sig[i] - avg);
+      var out = new Array(n);
+      for (var i = 0; i < n; i++) out[i] = sig[i] - avg;
       return out;
     }
     var slope = (n * sxy - sx * sy) / denom;
     var intercept = (sy - slope * sx) / n;
-    var out = [];
-    for (var i = 0; i < n; i++) {
-      out.push(sig[i] - (slope * i + intercept));
-    }
+    var out = new Array(n);
+    for (var i = 0; i < n; i++) out[i] = sig[i] - (slope * i + intercept);
     return out;
   }
 
-  // 이동평균 스무딩
   _smooth(sig, w) {
     if (w < 2) return sig.slice();
     var half = Math.floor(w / 2);
-    var out = [];
+    var out = new Array(sig.length);
     for (var i = 0; i < sig.length; i++) {
       var sum = 0, c = 0;
       var lo = Math.max(0, i - half);
       var hi = Math.min(sig.length - 1, i + half);
-      for (var j = lo; j <= hi; j++) {
-        sum += sig[j]; c++;
-      }
-      out.push(sum / c);
+      for (var j = lo; j <= hi; j++) { sum += sig[j]; c++; }
+      out[i] = sum / c;
     }
     return out;
   }
