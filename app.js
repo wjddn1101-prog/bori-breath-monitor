@@ -301,10 +301,16 @@
       $('#btn-flash').classList.toggle('on', flashOn);
       $('#flash-icon').textContent = flashOn ? '💡' : '🔦';
       $('#flash-label').textContent = flashOn ? '플래시 끄기' : '플래시 켜기';
+      // 플래시 켜면 밝기 조절 팁 표시
+      var tip = $('#flash-tip');
+      if (tip) {
+        if (flashOn) tip.classList.remove('hidden');
+        else tip.classList.add('hidden');
+      }
     }).catch(function(e) {
       flashOn = false;
       $('#btn-flash').classList.remove('on');
-      showAlert('플래시 오류', '이 기기에서 플래시를 지원하지 않습니다.', '화면 밝기 슬라이더를 사용해보세요.');
+      showAlert('플래시 오류', '이 기기에서 플래시를 지원하지 않습니다.', '보조 조명(화면 밝기) 슬라이더를 사용해보세요.');
     });
   }
 
@@ -511,6 +517,23 @@
       } else {
         $('#auto-breath-status').textContent = '호흡 감지 중... 잠시 기다려주세요';
       }
+    }
+
+    // 신호 품질 바 업데이트
+    var sq = analyzer.signalQuality || 0;
+    var sqFill = $('#sq-fill');
+    if (sqFill) {
+      sqFill.style.width = sq + '%';
+      sqFill.className = sq >= 60 ? 'high' : sq >= 35 ? 'mid' : 'low';
+    }
+    var sqVal = $('#sq-value');
+    if (sqVal) sqVal.textContent = sq + '%';
+
+    // 저조도 경고 표시
+    var llWarn = $('#low-light-warn');
+    if (llWarn) {
+      if (analyzer.isLowLight) llWarn.classList.remove('hidden');
+      else llWarn.classList.add('hidden');
     }
 
     var elapsed = analyzer.getElapsedSeconds();

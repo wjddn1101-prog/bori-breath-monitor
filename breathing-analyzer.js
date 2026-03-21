@@ -60,6 +60,14 @@ class BreathingAnalyzer {
     // === 칼만 필터 ===
     this._kalman = { x: 0, p: 100, q: 0.5, r: 4, initialized: false };
 
+    // === 저조도 최적화 ===
+    this.signalQuality = 0;          // 0~100 신호 품질
+    this.isLowLight = false;         // 저조도 모드 활성 여부
+    this._noiseFloor = 0;            // 추정 노이즈 수준
+    this._noiseDiffs = [];           // 노이즈 추정용 프레임간 차이
+    this._validFrameCount = 0;       // 유효 프레임 수 (모션 제외)
+    this._totalFrameCount = 0;       // 전체 프레임 수
+
     // === Web Worker ===
     this._worker = null;
     this._workerBusy = false;
@@ -71,7 +79,7 @@ class BreathingAnalyzer {
     this._lastAnalysisTime = 0;
   }
 
-  // ========== 감도 파라미터 ==========
+  // ========== 감도 파라미터 (저조도 적응형) ==========
   getParams() {
     var p = {
       low:       { windowSec: 45, smoothW: 11, minCycles: 5, acThreshold: 0.30, motionThreshold: 0.08, minBpm: 6, maxBpm: 40 },
@@ -80,7 +88,51 @@ class BreathingAnalyzer {
       very_high: { windowSec: 15, smoothW: 3,  minCycles: 2, acThreshold: 0.12, motionThreshold: 0.04, minBpm: 4, maxBpm: 80 },
       ultra:     { windowSec: 10, smoothW: 2,  minCycles: 2, acThreshold: 0.08, motionThreshold: 0.03, minBpm: 4, maxBpm: 100 },
     };
-    return p[this.sensitivity] || p.medium;
+    var base = p[this.sensitivity] || p.medium;
+
+    // === 저조도 적응: 프레임 밝기 기반 자동 보정 ===
+    var b = this._frameBrightness;
+    if (b >= 80) {
+      this.isLowLight = false;
+      return base;
+    }
+
+    // 저조도 모드 활성
+    this.isLowLight = true;
+    var adj = {};
+    for (var k in base) adj[k] = base[k];
+
+    if (b < 30) {
+      // 매우 어두움: 공격적 노이즈 보정
+      adj.smoothW = Math.max(base.smoothW, 15);          // 스무딩 대폭 강화
+      adj.windowSec = Math.max(base.windowSec, 45);      // 긴 윈도우 (더 많은 데이터)
+      adj.minCycles = Math.max(base.minCycles, 5);        // 최소 사이클 상향
+      adj.motionThreshold = base.motionThreshold * 1.8;   // 노이즈성 모션 오탐 방지
+      adj.acThreshold = Math.max(base.acThreshold, 0.20); // 자기상관 기준 상향
+    } else if (b < 60) {
+      // 어두움: 중간 보정
+      adj.smoothW = Math.max(base.smoothW, 11);
+      adj.windowSec = Math.max(base.windowSec, 35);
+      adj.minCycles = Math.max(base.minCycles, 4);
+      adj.motionThreshold = base.motionThreshold * 1.4;
+      adj.acThreshold = Math.max(base.acThreshold, 0.18);
+    } else {
+      // 약간 어두움: 미세 보정
+      adj.smoothW = Math.max(base.smoothW, 9);
+      adj.windowSec = Math.max(base.windowSec, 32);
+      adj.motionThreshold = base.motionThreshold * 1.2;
+    }
+
+    // 칼만 필터 노이즈 가중치도 조정 (저조도일수록 측정값 불신)
+    if (b < 40) {
+      this._kalman.r = 8;   // 측정 노이즈 크게 → 더 보수적
+      this._kalman.q = 0.3; // 프로세스 노이즈 작게 → 더 부드럽게
+    } else if (b < 80) {
+      this._kalman.r = 6;
+      this._kalman.q = 0.4;
+    }
+
+    return adj;
   }
 
   setROI(roi) { this.roi = roi; }
@@ -106,6 +158,12 @@ class BreathingAnalyzer {
     this._activeChannel = 'g';
     this._channelSelectTime = 0;
     this._workerResult = null;
+    this.signalQuality = 0;
+    this.isLowLight = false;
+    this._noiseFloor = 0;
+    this._noiseDiffs = [];
+    this._validFrameCount = 0;
+    this._totalFrameCount = 0;
     this._workerBusy = false;
     this._lastWorkerPost = 0;
     this._lastAnalysisTime = 0;
@@ -294,6 +352,51 @@ class BreathingAnalyzer {
     return Math.round(k.x);
   }
 
+  // ========== 신호 품질 계산 (0~100) ==========
+  _updateSignalQuality() {
+    var q = 100;
+
+    // 1. 밝기 페널티 (저조도)
+    var b = this._frameBrightness;
+    if (b < 20) q -= 45;
+    else if (b < 40) q -= 30;
+    else if (b < 60) q -= 15;
+    else if (b < 80) q -= 5;
+
+    // 2. 모션 안정성
+    if (this._fusedMotion > 4) q -= 25;
+    else if (this._fusedMotion > 2) q -= 15;
+    else if (this._fusedMotion > 1) q -= 5;
+
+    // 3. 노이즈 대비 신호 강도
+    if (this._noiseFloor > 0.001 && this._bufG.length > 30) {
+      var activeBuf = this._activeChannel === 'r' ? this._bufR : this._activeChannel === 'b' ? this._bufB : this._bufG;
+      var recent = activeBuf.slice(-30);
+      var sigVar = 0, sigMean = 0;
+      for (var i = 0; i < recent.length; i++) sigMean += recent[i];
+      sigMean /= recent.length;
+      for (var i = 0; i < recent.length; i++) sigVar += (recent[i] - sigMean) * (recent[i] - sigMean);
+      sigVar = Math.sqrt(sigVar / recent.length);
+      var snr = sigVar / (this._noiseFloor + 0.0001);
+      if (snr < 1.5) q -= 25;
+      else if (snr < 3) q -= 15;
+      else if (snr < 5) q -= 5;
+    }
+
+    // 4. 유효 프레임 비율 (모션 제외)
+    if (this._totalFrameCount > 30) {
+      var validRatio = this._validFrameCount / this._totalFrameCount;
+      if (validRatio < 0.5) q -= 20;
+      else if (validRatio < 0.7) q -= 10;
+    }
+
+    // 5. 분석 성공 여부
+    if (this.nullCount > 60) q -= 15;
+    else if (this.nullCount > 30) q -= 8;
+
+    this.signalQuality = Math.max(0, Math.min(100, q));
+  }
+
   // ========== 매 프레임: 데이터 수집 + 분석 ==========
   analyzeFrame(video) {
     if (!this.isAnalyzing || !this.roi) return this.lastValidBpm;
@@ -365,6 +468,7 @@ class BreathingAnalyzer {
       if (change > params.motionThreshold) isShaking = true;
     }
 
+    this._totalFrameCount++;
     if (isShaking) {
       this._motionFrames++;
       this._prevBrightness = brightness;
@@ -400,6 +504,25 @@ class BreathingAnalyzer {
     this._bufG.push(filtG);
     this._bufB.push(filtB);
     this.timestamps.push(now);
+    this._totalFrameCount++;
+    this._validFrameCount++;
+
+    // 노이즈 추정: 활성 채널의 프레임간 차이 분산 추적
+    var activeFilt = this._activeChannel === 'r' ? filtR : this._activeChannel === 'b' ? filtB : filtG;
+    if (this._bufG.length > 1) {
+      var prevBuf = this._activeChannel === 'r' ? this._bufR : this._activeChannel === 'b' ? this._bufB : this._bufG;
+      var diff = activeFilt - prevBuf[prevBuf.length - 2];
+      this._noiseDiffs.push(diff * diff);
+      if (this._noiseDiffs.length > 90) this._noiseDiffs.shift();
+      if (this._noiseDiffs.length > 10) {
+        var nSum = 0;
+        for (var ni = 0; ni < this._noiseDiffs.length; ni++) nSum += this._noiseDiffs[ni];
+        this._noiseFloor = Math.sqrt(nSum / this._noiseDiffs.length);
+      }
+    }
+
+    // 신호 품질 계산 (0~100)
+    this._updateSignalQuality();
 
     // 버퍼 최대 90초분 유지
     while (this.timestamps.length > 0 && now - this.timestamps[0] > 90000) {
@@ -407,8 +530,10 @@ class BreathingAnalyzer {
       this.timestamps.shift();
     }
 
-    // 최소 5초 데이터 필요
-    if (now - this.timestamps[0] < 5000 || this.timestamps.length < 40) {
+    // 최소 데이터: 저조도에서는 더 많은 데이터 필요
+    var minSec = this.isLowLight ? 8 : 5;
+    var minFrames = this.isLowLight ? 60 : 40;
+    if (now - this.timestamps[0] < minSec * 1000 || this.timestamps.length < minFrames) {
       return this.lastValidBpm;
     }
 

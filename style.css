@@ -266,6 +266,17 @@ nav { display: flex; gap: 4px; }
   background: var(--yellow); color: #000; border-color: var(--yellow);
 }
 
+#flash-tip {
+  background: rgba(74, 144, 217, 0.12); border-radius: 8px; padding: 10px 12px;
+}
+.light-tip {
+  font-size: 12px; color: var(--blue); line-height: 1.5;
+}
+.light-tip b { color: var(--text); }
+.light-tip-sub {
+  font-size: 11px; color: var(--text2); margin-top: 4px;
+}
+
 #brightness-control {
   display: flex; flex-direction: column; gap: 6px;
 }
@@ -298,6 +309,29 @@ nav { display: flex; gap: 4px; }
 
 #auto-bpm-display {
   background: var(--card); border-radius: 12px; padding: 16px; text-align: center;
+}
+
+/* 신호 품질 표시 */
+#signal-quality-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px; padding: 0 4px;
+}
+.sq-label { font-size: 11px; color: var(--text2); white-space: nowrap; }
+.sq-bar {
+  flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
+}
+#sq-fill {
+  height: 100%; width: 0%; border-radius: 3px;
+  background: var(--green); transition: width 0.5s, background 0.5s;
+}
+#sq-fill.low { background: var(--red); }
+#sq-fill.mid { background: var(--yellow); }
+#sq-fill.high { background: var(--green); }
+#sq-value { font-size: 11px; color: var(--text2); min-width: 28px; text-align: right; }
+
+#low-light-warn {
+  font-size: 11px; color: var(--yellow); margin-bottom: 6px;
+  padding: 4px 8px; background: rgba(255,193,7,0.1); border-radius: 6px;
 }
 .bpm-row { display: flex; align-items: baseline; justify-content: center; gap: 6px; }
 .bpm-row .bpm-number { font-size: 48px; font-weight: 700; color: var(--green); }

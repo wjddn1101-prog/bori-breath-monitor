@@ -117,14 +117,18 @@
           </div>
         </div>
 
-        <!-- 플래시 & 밝기 컨트롤 -->
+        <!-- 플래시 & 조명 컨트롤 -->
         <div id="light-controls" class="hidden">
           <button id="btn-flash" class="flash-btn">
             <span id="flash-icon">🔦</span>
             <span id="flash-label">플래시 켜기</span>
           </button>
+          <div id="flash-tip" class="hidden">
+            <p class="light-tip">💡 밝기 조절: <b>제어센터</b> → 손전등 아이콘 <b>꾹 누르기</b></p>
+            <p class="light-tip-sub">최소 밝기로 30~50cm 거리에서 촬영하면 최적</p>
+          </div>
           <div id="brightness-control">
-            <span class="brightness-label">화면 밝기</span>
+            <span class="brightness-label">보조 조명 (화면)</span>
             <div class="brightness-slider-row">
               <span class="brightness-min">🌙</span>
               <input type="range" id="brightness-slider" min="0" max="100" value="0">
@@ -137,6 +141,15 @@
 
         <!-- 자동 BPM 표시 -->
         <div id="auto-bpm-display" class="hidden">
+          <!-- 신호 품질 표시 -->
+          <div id="signal-quality-row">
+            <span class="sq-label">신호 품질</span>
+            <div class="sq-bar">
+              <div id="sq-fill"></div>
+            </div>
+            <span id="sq-value">--</span>
+          </div>
+          <div id="low-light-warn" class="hidden">⚠️ 저조도 — 노이즈 보정 활성화됨</div>
           <div class="bpm-row">
             <span class="bpm-number" id="auto-bpm">--</span>
             <span class="bpm-label">회/분</span>
