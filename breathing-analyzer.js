@@ -27,15 +27,22 @@ class BreathingAnalyzer {
 
     // 결과
     this.lastValidBpm = null;
-    this.confidence = 0;        // 0~1 신뢰도
-    this.smoothedSignal = [];   // UI 파형 표시용
-    this.peaks = [];            // UI 피크 마커용
+    this.confidence = 0;
+    this.smoothedSignal = [];
+    this.peaks = [];
     this._windowStartIdx = 0;
     this.nullCount = 0;
 
     // 모션 게이트
     this._prevBrightness = null;
     this._motionFrames = 0;
+
+    // [신규] 손떨림 방지 시스템
+    this._prevFrameData = null;       // 이전 프레임 ROI 픽셀 (광학 흐름)
+    this._gyroShakeLevel = 0;         // 자이로스코프 흔들림 수치
+    this._gyroHandler = null;
+    this._lpfState = 0;               // 버터워스 로우패스 필터 상태
+    this._lpfInitialized = false;
   }
 
   /**
@@ -73,9 +80,42 @@ class BreathingAnalyzer {
     this.nullCount = 0;
     this._prevBrightness = null;
     this._motionFrames = 0;
+    this._prevFrameData = null;
+    this._lpfState = 0;
+    this._lpfInitialized = false;
+
+    // [신규] 자이로스코프 손떨림 감지 시작
+    this._startGyro();
   }
 
-  stop() { this.isAnalyzing = false; }
+  stop() {
+    this.isAnalyzing = false;
+    this._stopGyro();
+  }
+
+  // === 자이로스코프 기반 물리적 손떨림 감지 ===
+  _startGyro() {
+    this._gyroShakeLevel = 0;
+    if (window.DeviceMotionEvent) {
+      this._gyroHandler = (event) => {
+        var r = event.rotationRate;
+        if (r) {
+          // 초당 회전 각속도 크기 (deg/s) — 손떨림은 보통 5~50 deg/s
+          var magnitude = Math.sqrt((r.alpha||0)**2 + (r.beta||0)**2 + (r.gamma||0)**2);
+          // 지수 이동평균으로 부드럽게 추적
+          this._gyroShakeLevel = this._gyroShakeLevel * 0.7 + magnitude * 0.3;
+        }
+      };
+      window.addEventListener('devicemotion', this._gyroHandler);
+    }
+  }
+
+  _stopGyro() {
+    if (this._gyroHandler) {
+      window.removeEventListener('devicemotion', this._gyroHandler);
+      this._gyroHandler = null;
+    }
+  }
 
   getElapsedSeconds() {
     return this.startTime ? Math.round((Date.now() - this.startTime) / 1000) : 0;
@@ -112,28 +152,69 @@ class BreathingAnalyzer {
     var brightness = total / count;
     var now = Date.now();
 
-    // === 모션 게이트 ===
-    // 급격한 밝기 변화 = 카메라 흔들림 또는 강아지 움직임
+    // === 강화된 3단계 모션 게이트 ===
+    var params = this.getParams();
+    var isShaking = false;
+
+    // 1단계: 자이로스코프 물리 떨림 감지 (5 deg/s 이상 = 손떨림)
+    if (this._gyroShakeLevel > 5) {
+      isShaking = true;
+    }
+
+    // 2단계: 광학 흐름 — ROI 픽셀 이동량 추적
+    var currentFrameData = data;
+    if (this._prevFrameData && this._prevFrameData.length === data.length) {
+      var pixelShift = 0;
+      var sampleStep = Math.max(4, Math.floor(data.length / 400)) * 4; // 100개 샘플
+      var sampleCount = 0;
+      for (var fi = 0; fi < data.length && fi < this._prevFrameData.length; fi += sampleStep) {
+        pixelShift += Math.abs(data[fi] - this._prevFrameData[fi]);
+        pixelShift += Math.abs(data[fi+1] - this._prevFrameData[fi+1]);
+        sampleCount++;
+      }
+      if (sampleCount > 0) {
+        pixelShift /= (sampleCount * 2);
+        // 평균 픽셀 변화가 3 이상이면 카메라 움직임 감지
+        if (pixelShift > 3) isShaking = true;
+      }
+    }
+    // 현재 프레임 저장 (복사)
+    this._prevFrameData = new Uint8ClampedArray(data);
+
+    // 3단계: 밝기 변화율 (기존 방식 유지)
     if (this._prevBrightness !== null) {
       var change = Math.abs(brightness - this._prevBrightness) / (this._prevBrightness + 0.001);
-      var params = this.getParams();
-      if (change > params.motionThreshold) {
-        this._motionFrames++;
-        this._prevBrightness = brightness;
-        // 모션 프레임이 10개 이상 연속되면 버퍼 리셋
-        if (this._motionFrames > 10) {
-          this.rawBuffer = [];
-          this.timestamps = [];
-          this._motionFrames = 0;
-        }
-        return this.lastValidBpm;
+      if (change > params.motionThreshold) isShaking = true;
+    }
+
+    if (isShaking) {
+      this._motionFrames++;
+      this._prevBrightness = brightness;
+      if (this._motionFrames > 10) {
+        this.rawBuffer = [];
+        this.timestamps = [];
+        this._motionFrames = 0;
       }
+      return this.lastValidBpm;
     }
     this._motionFrames = 0;
     this._prevBrightness = brightness;
 
-    // 버퍼에 추가
-    this.rawBuffer.push(brightness);
+    // [신규] 버터워스 로우패스 필터 (1.5Hz 차단 = 90BPM 이상 차단)
+    // 손떨림(3~10Hz)을 완벽히 제거하면서 호흡 신호(0.1~1.5Hz)만 통과
+    if (!this._lpfInitialized) {
+      this._lpfState = brightness;
+      this._lpfInitialized = true;
+    }
+    // 프레임간 시간차 기반 적응형 알파 계산
+    var dt = this.timestamps.length > 0 ? (now - this.timestamps[this.timestamps.length - 1]) / 1000 : 0.033;
+    var cutoffHz = 1.5; // 차단 주파수: 1.5Hz (= 분당 90회)
+    var rc = 1.0 / (2 * Math.PI * cutoffHz);
+    var alpha = dt / (rc + dt);
+    this._lpfState += alpha * (brightness - this._lpfState);
+
+    // 필터링된 신호를 버퍼에 추가
+    this.rawBuffer.push(this._lpfState);
     this.timestamps.push(now);
 
     // 버퍼 최대 90초분 유지
