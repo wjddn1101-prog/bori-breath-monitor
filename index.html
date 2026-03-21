@@ -46,20 +46,18 @@
           가슴/배가 올라올 때 한 번씩 누르면 됩니다.</p>
         </div>
 
-        <!-- BPM 원 = 탭 버튼 역할 -->
-        <div id="manual-display">
-          <button id="btn-tap" class="bpm-circle-tap" aria-label="숨 쉴 때 탭">
-            <div class="bpm-circle" id="manual-bpm-circle">
-              <span class="bpm-number" id="manual-bpm">--</span>
-              <span class="bpm-label">회/분</span>
-            </div>
-          </button>
-          <div id="manual-status-text">탭하면 자동으로 시작됩니다</div>
+        <!-- 박스 전체가 탭 버튼 역할 -->
+        <button id="btn-tap" class="manual-display-btn" aria-label="숨 쉴 때 탭">
+          <div class="bpm-circle" id="manual-bpm-circle">
+            <span class="bpm-number" id="manual-bpm">--</span>
+            <span class="bpm-label">회/분</span>
+          </div>
+          <div id="manual-status-text">이 박스를 탭하면 시작/측정됩니다</div>
           <div class="manual-meta">
             <span>탭: <b id="tap-count-num">0</b>회</span>
             <span>경과: <b id="manual-elapsed">0:00</b></span>
           </div>
-        </div>
+        </button>
 
         <!-- 수동 컨트롤 -->
         <div id="manual-controls">
@@ -78,15 +76,21 @@
 
         <!-- 응급 바로가기 -->
         <div id="quick-emergency">
-          <a href="tel:051-868-7591" class="quick-btn emergency-btn">🚑 응급전화</a>
+          <details class="quick-btn emergency-btn">
+            <summary>🚑 응급전화</summary>
+            <div class="quick-dropdown">
+              <div class="hospital-mini">부산동물메디컬센터 (24시)</div>
+              <a href="tel:051-868-7591" class="call-btn-mini">📞 051-868-7591</a>
+            </div>
+          </details>
           <details class="quick-btn cpr-btn">
             <summary>💓 CPR 가이드</summary>
-            <div class="cpr-dropdown">
-              <a href="https://www.youtube.com/watch?v=I78RebMW4Ps" target="_blank" class="cpr-yt-mini">▶️ 영상 보기</a>
+            <div class="quick-dropdown">
+              <a href="https://www.youtube.com/watch?v=I78RebMW4Ps" target="_blank" class="yt-btn-mini">▶️ 영상 보기</a>
               <div class="cpr-mini-steps">
                 <div><b>1.</b> 의식·호흡 확인</div>
                 <div><b>2.</b> 기도 확보 (목 젖히기)</div>
-                <div><b>3.</b> 가슴 압박 100~120회/분</div>
+                <div><b>3.</b> 가슴 압박 (100~120회/분)</div>
                 <div><b>4.</b> 30회 압박 + 2회 인공호흡 반복</div>
               </div>
             </div>
