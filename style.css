@@ -83,13 +83,15 @@ nav { display: flex; gap: 4px; }
 /* 수동 측정 박스 자체를 버튼화 */
 .manual-display-btn {
   display: block; width: 100%;
-  text-align: center; padding: 20px;
-  background: var(--card); border-radius: 16px;
+  -webkit-appearance: none; appearance: none;
+  text-align: center; padding: 36px 20px;
+  background-color: var(--card); border-radius: 20px;
   border: 2px solid transparent; color: var(--text);
-  font-family: inherit;
+  font-family: inherit; font-size: inherit;
   cursor: pointer; transition: transform 0.08s, border-color 0.2s, background 0.2s;
   -webkit-tap-highlight-color: transparent;
-  margin-bottom: 14px;
+  margin-bottom: 20px;
+  box-shadow: 0 8px 16px rgba(0,0,0,0.15);
 }
 .manual-display-btn:active {
   transform: scale(0.97);
@@ -98,16 +100,17 @@ nav { display: flex; gap: 4px; }
 }
 .manual-display-btn:active .bpm-circle {
   border-color: var(--green) !important;
-  box-shadow: 0 0 30px rgba(76,175,80,0.3) !important;
+  box-shadow: 0 0 40px rgba(76,175,80,0.4) !important;
 }
 
 .bpm-circle {
-  width: 160px; height: 160px; margin: 0 auto 16px;
+  width: 170px; height: 170px; margin: 0 auto 24px;
   border-radius: 50%;
   border: 4px solid var(--border);
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
   transition: border-color 0.3s, box-shadow 0.3s;
+  box-shadow: inset 0 0 20px rgba(0,0,0,0.2);
 }
 .bpm-circle.active { border-color: var(--green); box-shadow: 0 0 30px rgba(76,175,80,0.2); }
 .bpm-circle.warning { border-color: var(--yellow); box-shadow: 0 0 30px rgba(255,193,7,0.2); }
@@ -141,60 +144,66 @@ nav { display: flex; gap: 4px; }
 .interval-bar.warning { background: var(--yellow); }
 .interval-bar.danger { background: var(--red); }
 
-/* 응급 바로가기 컴팩트 버튼 */
+/* 응급 바로가기 깔끔한 아코디언 스타일 */
 #quick-emergency {
-  display: flex; gap: 8px;
-  align-items: flex-start;
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 16px;
 }
 
 .quick-btn {
-  flex: 1;
-  text-align: center;
-  font-size: 13px;
-  font-weight: 600;
-  border-radius: 10px;
-  background: var(--card); 
-  color: var(--text);
-  border: 1px solid var(--border);
+  background: var(--card); color: var(--text);
+  border-radius: 12px; border: 1px solid var(--border);
+  overflow: hidden;
+  transition: border-color 0.2s;
 }
+.quick-btn[open] {
+  border-color: var(--blue);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+}
+
 .quick-btn summary {
-  padding: 12px 8px;
-  list-style: none;
-  cursor: pointer;
-  outline: none;
+  padding: 16px;
+  font-size: 14px; font-weight: 600;
+  display: flex; align-items: center; justify-content: space-between;
+  list-style: none; cursor: pointer; outline: none;
+  -webkit-tap-highlight-color: transparent;
 }
 .quick-btn summary::-webkit-details-marker { display: none; }
-.quick-btn[open] { border-color: var(--blue); }
+.quick-btn summary::after { content: '▾'; color: var(--text2); font-size: 18px; transition: transform 0.3s; }
+.quick-btn[open] summary::after { transform: rotate(180deg); color: var(--blue); }
 
 .emergency-btn summary { color: var(--red); }
 .cpr-btn summary { color: var(--text); }
 
 .quick-dropdown {
-  padding: 10px;
-  border-top: 1px solid var(--border);
-  text-align: left;
+  padding: 0 16px 16px;
 }
 
 .hospital-mini {
-  font-size: 12px; color: var(--text); font-weight: 700; margin-bottom: 6px; text-align: center;
+  font-size: 14px; color: var(--text); font-weight: 600; margin-bottom: 12px; text-align: center;
 }
 .call-btn-mini {
-  display: block; background: var(--green); color: #fff; text-decoration: none; text-align: center;
-  padding: 10px; border-radius: 8px; font-size: 14px; font-weight: 700; transition: transform 0.1s;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--red); color: #fff; text-decoration: none;
+  padding: 14px; border-radius: 10px; font-size: 18px; font-weight: 700;
+  box-shadow: 0 4px 12px rgba(244,67,54,0.3); transition: transform 0.1s;
 }
 .call-btn-mini:active { transform: scale(0.96); }
 
 .yt-btn-mini {
-  display: block; background: #cc0000; color: #fff; text-decoration: none; text-align: center;
-  padding: 8px; border-radius: 6px; font-size: 12px; font-weight: 600; margin-bottom: 8px; transition: transform 0.1s;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: #cc0000; color: #fff; text-decoration: none;
+  padding: 12px; border-radius: 8px; font-size: 13px; font-weight: 600; margin-bottom: 14px;
+  transition: transform 0.1s;
 }
 .yt-btn-mini:active { transform: scale(0.96); }
 
-.cpr-mini-steps { display: flex; flex-direction: column; gap: 4px; }
+.cpr-mini-steps { display: flex; flex-direction: column; gap: 8px; }
 .cpr-mini-steps div {
-  font-size: 11px; color: var(--text2); padding: 5px 6px; background: var(--bg); border-radius: 4px; line-height: 1.4;
+  font-size: 12px; color: var(--text2); padding: 10px 12px;
+  background: var(--bg); border-radius: 8px; line-height: 1.5;
 }
-.cpr-mini-steps b { color: var(--yellow); }
+.cpr-mini-steps b { color: var(--red); font-weight: 700; display: inline-block; width: 16px; }
 
 #manual-controls { display: flex; gap: 10px; }
 
