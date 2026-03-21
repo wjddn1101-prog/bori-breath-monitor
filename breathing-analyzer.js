@@ -189,8 +189,13 @@ class BreathingAnalyzer {
         this._workerBusy = false;
         this._workerResult = e.data;
       };
-      this._worker.onerror = () => {
+      this._worker.onerror = (err) => {
+        console.warn('Worker error:', err);
+        this._workerBusy = false;
         this._worker = null;  // Worker 실패 시 메인 스레드 폴백
+      };
+      this._worker.onmessageerror = () => {
+        this._workerBusy = false;
       };
     } catch (e) {
       this._worker = null;
@@ -504,7 +509,6 @@ class BreathingAnalyzer {
     this._bufG.push(filtG);
     this._bufB.push(filtB);
     this.timestamps.push(now);
-    this._totalFrameCount++;
     this._validFrameCount++;
 
     // 노이즈 추정: 활성 채널의 프레임간 차이 분산 추적
@@ -540,37 +544,46 @@ class BreathingAnalyzer {
     // === 자동 채널 선택 (3초 간격) ===
     this._autoSelectChannel(now);
 
-    // === 분석 실행 (Worker 또는 메인 스레드) ===
+    // === 분석 실행 (Worker + 메인 스레드 이중 보장) ===
     var activeBuffer = this._activeChannel === 'r' ? this._bufR :
                        this._activeChannel === 'b' ? this._bufB : this._bufG;
 
-    // Worker 사용: 300ms 간격으로 비동기 분석
+    // Worker 결과 먼저 확인 (이전 프레임에서 보낸 결과)
+    if (this._workerResult) {
+      var wr = this._workerResult;
+      this._workerResult = null;
+      this._processAnalysisResult(wr);
+    }
+
+    // Worker 타임아웃: 2초 이상 응답 없으면 stuck 판정 → 리셋
+    if (this._workerBusy && now - this._lastWorkerPost > 2000) {
+      this._workerBusy = false;
+    }
+
+    // Worker에 새 분석 요청 (비동기, 300ms 간격)
     if (this._worker && !this._workerBusy && now - this._lastWorkerPost > 300) {
       var windowMs = params.windowSec * 1000;
       var startIdx = 0;
       for (var i = this.timestamps.length - 1; i >= 0; i--) {
         if (now - this.timestamps[i] > windowMs) { startIdx = i + 1; break; }
       }
-
       var sig = activeBuffer.slice(startIdx);
       var ts = this.timestamps.slice(startIdx);
       if (sig.length >= 30) {
         this._workerBusy = true;
         this._lastWorkerPost = now;
         this._workerStartIdx = startIdx;
-        this._worker.postMessage({ signal: sig, timestamps: ts, params: params, fps: sig.length / ((ts[ts.length - 1] - ts[0]) / 1000) });
+        try {
+          this._worker.postMessage({ signal: sig, timestamps: ts, params: params, fps: sig.length / ((ts[ts.length - 1] - ts[0]) / 1000) });
+        } catch (e) {
+          this._workerBusy = false;
+          this._worker = null; // Worker 오류 시 폐기
+        }
       }
     }
 
-    // Worker 결과 수신 시 처리
-    if (this._workerResult) {
-      var wr = this._workerResult;
-      this._workerResult = null;
-      return this._processAnalysisResult(wr);
-    }
-
-    // Worker 없거나 아직 응답 안 왔으면 — 메인 스레드 폴백 (500ms 간격)
-    if (!this._worker && now - this._lastAnalysisTime > 500) {
+    // 메인 스레드 분석 (항상 400ms 간격으로 실행 — Worker 유무 무관)
+    if (now - this._lastAnalysisTime > 400) {
       this._lastAnalysisTime = now;
       var bpm = this._analyzeWindow(activeBuffer);
       return this._processResult(bpm);
