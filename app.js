@@ -627,6 +627,59 @@
     records.unshift(r);
     if (records.length > 365) records.length = 365;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    
+    // 아이폰 캘린더에 자동 추가 (.ics 파일 생성)
+    addToCalendar(r);
+  }
+
+  function addToCalendar(r) {
+    try {
+      var d = new Date(r.date);
+      var status = r.bpm >= 40 ? '🚨위험' : r.bpm >= 30 ? '⚠️주의' : '✅정상';
+      var method = r.method === 'manual' ? '수동 탭' : '자동 영상분석';
+      
+      // 날짜를 ICS 형식으로 변환 (YYYYMMDDTHHmmss)
+      function icsDate(date) {
+        return date.getFullYear() +
+          String(date.getMonth()+1).padStart(2,'0') +
+          String(date.getDate()).padStart(2,'0') + 'T' +
+          String(date.getHours()).padStart(2,'0') +
+          String(date.getMinutes()).padStart(2,'0') +
+          String(date.getSeconds()).padStart(2,'0');
+      }
+      
+      var endDate = new Date(d.getTime() + (r.duration || 60) * 1000);
+      
+      var title = '🐾 보리 호흡: ' + r.bpm + '회/분 ' + status;
+      var desc = '호흡수: ' + r.bpm + '회/분\\n' +
+                 '상태: ' + status + '\\n' +
+                 '측정방법: ' + method + '\\n' +
+                 '측정시간: ' + (r.duration || 0) + '초' +
+                 (r.memo ? '\\n메모: ' + r.memo : '');
+      
+      var ics = 'BEGIN:VCALENDAR\r\n' +
+        'VERSION:2.0\r\n' +
+        'PRODID:-//Bori Breath Monitor//KO\r\n' +
+        'BEGIN:VEVENT\r\n' +
+        'DTSTART:' + icsDate(d) + '\r\n' +
+        'DTEND:' + icsDate(endDate) + '\r\n' +
+        'SUMMARY:' + title + '\r\n' +
+        'DESCRIPTION:' + desc + '\r\n' +
+        'END:VEVENT\r\n' +
+        'END:VCALENDAR\r\n';
+      
+      var blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'bori_breath_' + icsDate(d) + '.ics';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch(e) {
+      console.log('Calendar export error:', e);
+    }
   }
 
   function deleteRecord(idx) {
