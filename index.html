@@ -247,6 +247,76 @@
         <button id="alert-close" class="control-btn primary">확인</button>
       </div>
     </div>
+
+    <!-- ========== 응급 정보 섹션 ========== -->
+    <footer id="emergency-section">
+      <h2 class="emergency-title">🚑 응급 연락처 & 심폐소생술</h2>
+
+      <!-- 동물병원 연락처 -->
+      <div class="emergency-hospitals">
+        <h3>🏥 부산 24시 동물병원</h3>
+        <div class="hospital-card">
+          <div class="hospital-name">부산동물메디컬센터 (24시)</div>
+          <a href="tel:051-742-7975" class="hospital-phone">📞 051-742-7975</a>
+          <div class="hospital-addr">부산 해운대구 마린시티2로 28</div>
+        </div>
+        <div class="hospital-card">
+          <div class="hospital-name">센텀동물메디컬센터 (24시)</div>
+          <a href="tel:051-782-7501" class="hospital-phone">📞 051-782-7501</a>
+          <div class="hospital-addr">부산 해운대구 센텀중앙로 78</div>
+        </div>
+        <div class="hospital-card">
+          <div class="hospital-name">동래동물의료센터 (24시)</div>
+          <a href="tel:051-556-7582" class="hospital-phone">📞 051-556-7582</a>
+          <div class="hospital-addr">부산 동래구 충렬대로 231</div>
+        </div>
+      </div>
+
+      <!-- 심폐소생술 -->
+      <div class="emergency-cpr">
+        <h3>💓 강아지 심폐소생술 (CPR)</h3>
+        <a href="https://www.youtube.com/watch?v=I78RebMW4Ps" target="_blank" class="cpr-youtube-link">
+          ▶️ 영상으로 배우기 (상어가족 박자 실습편)
+        </a>
+        <button id="btn-cpr-steps" class="cpr-steps-btn">📋 4단계 요약 보기</button>
+        <div id="cpr-tooltip" class="cpr-tooltip hidden">
+          <button id="btn-cpr-close" class="cpr-close">✕</button>
+          <h4>🐶 강아지 CPR 4단계</h4>
+          <div class="cpr-step">
+            <span class="step-num">1</span>
+            <div>
+              <b>의식·호흡 확인</b><br>
+              코 앞에 손등 대기 + 잇몸 색 확인<br>
+              <em>반응 없고 숨 안 쉬면 즉시 CPR 시작!</em>
+            </div>
+          </div>
+          <div class="cpr-step">
+            <span class="step-num">2</span>
+            <div>
+              <b>기도 확보</b><br>
+              목을 살짝 뒤로 젖히고 혀를 앞으로 당김<br>
+              <em>이물질 있으면 손가락으로 제거</em>
+            </div>
+          </div>
+          <div class="cpr-step">
+            <span class="step-num">3</span>
+            <div>
+              <b>가슴 압박 (상어가족 박자!)</b><br>
+              오른쪽으로 눕히고 가슴 가장 넓은 부분 압박<br>
+              <em>분당 100~120회 · 가슴 1/3~1/2 깊이</em>
+            </div>
+          </div>
+          <div class="cpr-step">
+            <span class="step-num">4</span>
+            <div>
+              <b>인공호흡</b><br>
+              30회 압박 후 코에 입 대고 2회 불어넣기<br>
+              <em>30:2 반복하며 즉시 동물병원으로!</em>
+            </div>
+          </div>
+        </div>
+      </div>
+    </footer>
   </div>
 
   <script src="breathing-analyzer.js"></script>

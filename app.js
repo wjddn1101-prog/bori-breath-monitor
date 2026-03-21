@@ -822,4 +822,19 @@
 
   function esc(s) { var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
   renderHistory();
+
+  // CPR 4단계 말풍선 토글
+  var cprBtn = document.querySelector('#btn-cpr-steps');
+  var cprTooltip = document.querySelector('#cpr-tooltip');
+  var cprClose = document.querySelector('#btn-cpr-close');
+  if (cprBtn && cprTooltip) {
+    cprBtn.addEventListener('click', function() {
+      cprTooltip.classList.toggle('hidden');
+    });
+    if (cprClose) {
+      cprClose.addEventListener('click', function() {
+        cprTooltip.classList.add('hidden');
+      });
+    }
+  }
 })();
