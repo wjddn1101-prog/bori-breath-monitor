@@ -89,7 +89,9 @@
     tapCountNum.textContent = tapTimes.length;
 
     btnTap.classList.add('flash');
-    setTimeout(function() { btnTap.classList.remove('flash'); }, 120);
+    var circle = btnTap.querySelector('.bpm-circle') || btnTap;
+    circle.classList.add('active');
+    setTimeout(function() { btnTap.classList.remove('flash'); circle.classList.remove('active'); }, 120);
 
     if (tapTimes.length >= 2) {
       var bpm = calcManualBpm();

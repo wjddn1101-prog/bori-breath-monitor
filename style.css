@@ -106,29 +106,23 @@ nav { display: flex; gap: 4px; }
 
 #manual-tap-count, #manual-timer { font-size: 13px; color: var(--text2); }
 
-/* 탭 버튼 */
-.tap-btn {
-  width: 100%; padding: 28px;
-  background: linear-gradient(135deg, #2a4a7f, #1a3060);
-  border: 3px solid var(--blue);
-  border-radius: 20px;
-  color: white; font-size: 20px; font-weight: 700;
-  cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  transition: transform 0.08s, background 0.08s;
+.manual-meta {
+  display: flex; justify-content: center; gap: 16px;
+  font-size: 12px; color: var(--text2); margin-top: 4px;
+}
+
+/* BPM 원 = 탭 버튼 */
+.bpm-circle-tap {
+  display: block; margin: 0 auto;
+  background: none; border: none; padding: 0; cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: transform 0.08s;
 }
-.tap-btn:active {
-  transform: scale(0.96);
-  background: linear-gradient(135deg, #3a6abf, #2a5090);
-  border-color: #6ab0ff;
-}
-.tap-btn.flash {
-  background: linear-gradient(135deg, #3a7a4f, #2a6a3f) !important;
+.bpm-circle-tap:active { transform: scale(0.93); }
+.bpm-circle-tap:active .bpm-circle {
   border-color: var(--green) !important;
+  box-shadow: 0 0 40px rgba(76,175,80,0.4) !important;
 }
-.tap-icon { font-size: 36px; }
-.tap-text { font-size: 16px; }
 
 /* 탭 간격 바 */
 #tap-intervals {
@@ -145,6 +139,70 @@ nav { display: flex; gap: 4px; }
 }
 .interval-bar.warning { background: var(--yellow); }
 .interval-bar.danger { background: var(--red); }
+
+/* 응급 바로가기 컴팩트 버튼 */
+#quick-emergency {
+  display: flex; gap: 8px;
+}
+
+.quick-btn {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.emergency-btn {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--red); color: #fff;
+  padding: 10px 8px;
+  transition: transform 0.1s;
+}
+.emergency-btn:active { transform: scale(0.95); }
+
+.cpr-btn {
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--border);
+}
+.cpr-btn summary {
+  padding: 10px 8px;
+  list-style: none;
+  cursor: pointer;
+}
+.cpr-btn summary::-webkit-details-marker { display: none; }
+
+.cpr-dropdown {
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.cpr-yt-mini {
+  display: block;
+  background: #cc0000;
+  color: #fff;
+  text-decoration: none;
+  text-align: center;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.cpr-mini-steps {
+  display: flex; flex-direction: column; gap: 3px;
+}
+.cpr-mini-steps div {
+  font-size: 11px; color: var(--text2);
+  padding: 4px 6px;
+  background: var(--bg);
+  border-radius: 4px;
+  line-height: 1.4;
+}
+.cpr-mini-steps b { color: var(--yellow); }
 
 #manual-controls { display: flex; gap: 10px; }
 
@@ -362,125 +420,4 @@ nav { display: flex; gap: 4px; }
   .bpm-circle { width: 130px; height: 130px; }
   .bpm-circle .bpm-number { font-size: 42px; }
 }
-
-/* ===== 응급 정보 섹션 ===== */
-#emergency-section {
-  padding: 0 16px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.emergency-card {
-  background: var(--card);
-  border-radius: 10px;
-  font-size: 13px;
-  color: var(--text2);
-}
-
-.emergency-card summary {
-  padding: 12px 14px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  list-style: none;
-}
-
-.emergency-card summary::-webkit-details-marker { display: none; }
-
-.emergency-card summary::after {
-  content: '▸';
-  float: right;
-  transition: transform 0.2s;
-}
-
-.emergency-card[open] summary::after {
-  transform: rotate(90deg);
-}
-
-.emergency-body {
-  padding: 0 14px 14px;
-}
-
-.hospital-card {
-  text-align: center;
-}
-
-.hospital-name {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text);
-  margin-bottom: 4px;
-}
-
-.hospital-tag {
-  display: inline-block;
-  background: var(--red);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 10px;
-  border-radius: 10px;
-  margin-bottom: 10px;
-}
-
-.hospital-call-btn {
-  display: block;
-  background: var(--green);
-  color: #fff;
-  text-decoration: none;
-  text-align: center;
-  padding: 12px;
-  border-radius: 10px;
-  font-size: 16px;
-  font-weight: 700;
-  margin-bottom: 8px;
-  transition: transform 0.1s;
-}
-
-.hospital-call-btn:active { transform: scale(0.97); }
-
-.hospital-addr {
-  font-size: 11px;
-  color: var(--text2);
-}
-
-.cpr-youtube-link {
-  display: block;
-  background: linear-gradient(135deg, #cc0000, #880000);
-  color: #fff;
-  text-decoration: none;
-  text-align: center;
-  padding: 12px;
-  border-radius: 10px;
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 10px;
-  transition: transform 0.1s;
-}
-
-.cpr-youtube-link:active { transform: scale(0.97); }
-
-.cpr-steps { display: flex; flex-direction: column; gap: 6px; }
-
-.cpr-step {
-  display: flex;
-  gap: 10px;
-  padding: 10px;
-  background: var(--bg);
-  border-radius: 8px;
-}
-
-.step-num {
-  min-width: 24px; height: 24px;
-  background: var(--red); color: #fff;
-  border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: 12px; flex-shrink: 0;
-}
-
-.cpr-step b { font-size: 12px; color: var(--text); }
-.cpr-step div { font-size: 11px; color: var(--text2); line-height: 1.5; }
-.cpr-step em { color: var(--yellow); font-style: normal; font-size: 10px; }
 
