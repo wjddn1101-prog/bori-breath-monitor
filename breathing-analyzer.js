@@ -423,9 +423,9 @@ class BreathingAnalyzer {
 
         // 특징점 찾기 (Shi-Tomasi)
         var p0 = new cv.Mat();
-        var maxCorners = 100;
-        var qualityLevel = 0.05;
-        var minDistance = 5;
+        var maxCorners = 150;     // 특징점 수 증가 (100 -> 150)
+        var qualityLevel = 0.01;  // 대비가 낮은 털에서도 잘 잡히도록 민감도 상향 (0.05 -> 0.01)
+        var minDistance = 10;     // 점들이 한 곳에 몰리지 않도록 간격 넓힘 (5 -> 10)
         cv.goodFeaturesToTrack(currGray, p0, maxCorners, qualityLevel, minDistance, mask);
 
         mask.delete();
@@ -436,11 +436,12 @@ class BreathingAnalyzer {
             if (this._prevGray) this._prevGray.delete();
             this._prevGray = currGray.clone();
             
-            // UI용 점 저장
+            // UI용 점 초기화 (0.0 ~ 1.0 정규화 좌표)
             this.trackedPoints = [];
             var ptr = p0.data32F;
             for (var i = 0; i < p0.rows; i++) {
-                this.trackedPoints.push({ x: ptr[i*2] / scale, y: ptr[i*2+1] / scale });
+                var nx = ptr[i*2] / cw, ny = ptr[i*2+1] / ch;
+                this.trackedPoints.push({ x0: nx, y0: ny, x1: nx, y1: ny });
             }
         }
         
@@ -480,8 +481,8 @@ class BreathingAnalyzer {
                 good_p1.push(x1, y1);
                 good_p0.push(x0, y0);
                 dyList.push(dy);
-                // UI 시각화용 이전, 현재 좌표 모두 저장
-                this.trackedPoints.push({ x0: x0 / scale, y0: y0 / scale, x1: x1 / scale, y1: y1 / scale });
+                // UI 시각화용 이전, 현재 좌표 모두 저장 (0.0 ~ 1.0 비율로 정규화)
+                this.trackedPoints.push({ x0: x0 / cw, y0: y0 / ch, x1: x1 / cw, y1: y1 / ch });
             }
         }
     }
