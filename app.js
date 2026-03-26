@@ -185,6 +185,7 @@
   // OpenCV 콜백
   window.openCvReady = false;
   window.onOpenCvReady = function() {
+    if (window.openCvReady) return;
     window.openCvReady = true;
     var loadMsg = $('#opencv-loading-msg');
     var startMsg = $('#camera-start-msg');
@@ -196,6 +197,26 @@
       btnCamera.classList.remove('disabled');
     }
   };
+
+  // 폴백: 0.5초마다 cv 및 cv.Mat 로드 상태 확인 (iOS 사파리 대응)
+  var cvCheckCount = 0;
+  var cvCheckInterval = setInterval(function() {
+    if (window.openCvReady) {
+      clearInterval(cvCheckInterval);
+      return;
+    }
+    // WebAssembly 초기화가 끝나면 cv.Mat이 함수로 존재함
+    if (typeof cv !== 'undefined' && typeof cv.Mat !== 'undefined') {
+      clearInterval(cvCheckInterval);
+      window.onOpenCvReady();
+    }
+    cvCheckCount++;
+    if (cvCheckCount > 40) { // 20초 경과시
+      clearInterval(cvCheckInterval);
+      var loadMsg = $('#opencv-loading-msg');
+      if (loadMsg) loadMsg.innerHTML = "OpenCV 로딩 실패.<br>인터넷 연결을 확인하고 새로고침 해주세요.<br>(Safari의 경우 캐시 비우기 권장)";
+    }
+  }, 500);
 
   // 비동기로 미리 로드되었을 경우 즉시 초기화
   if (window.openCvReadyFlag) {
