@@ -21,14 +21,16 @@ class BreathingAnalyzer {
     this.isAnalyzing = false;
     this.startTime = null;
 
-    // === 다중 채널 시그널 버퍼 ===
-    this._bufR = [];
-    this._bufG = [];
-    this._bufB = [];
+    // === 다중 채널 시그널 버퍼 대신 통합 변위 버퍼 ===
+    this._signalBuf = [];
     this.timestamps = [];
-    this._activeChannel = 'g';       // 자동 선택됨
-    this._channelSelectTime = 0;     // 마지막 채널 선택 시각
     this._frameBrightness = 128;     // 프레임 평균 밝기 (조도 대용)
+
+    // === OpenCV Optical Flow (Motion Capture) ===
+    this._prevGray = null;
+    this._prevPts = null;
+    this._cumulativeY = 0;
+    this.trackedPoints = [];         // UI 시각화용 가상 마커 좌표들
 
     // 결과
     this.lastValidBpm = null;
@@ -52,9 +54,9 @@ class BreathingAnalyzer {
     this._fusedMotion = 0;           // 상보 필터 융합값
     this._motionHandler = null;
 
-    // === 적응형 밴드패스 필터 (채널별) ===
-    this._hpf = { r: { prevX: 0, prevY: 0 }, g: { prevX: 0, prevY: 0 }, b: { prevX: 0, prevY: 0 } };
-    this._lpf = { r: 0, g: 0, b: 0 };
+    // === 적응형 밴드패스 필터 ===
+    this._hpf = { prevX: 0, prevY: 0 };
+    this._lpf = 0;
     this._bpfInitialized = false;
 
     // === 칼만 필터 ===
@@ -139,9 +141,7 @@ class BreathingAnalyzer {
   setSensitivity(s) { this.sensitivity = s; }
 
   start() {
-    this._bufR = [];
-    this._bufG = [];
-    this._bufB = [];
+    this._signalBuf = [];
     this.timestamps = [];
     this.smoothedSignal = [];
     this.peaks = [];
@@ -155,9 +155,13 @@ class BreathingAnalyzer {
     this._prevFrameData = null;
     this._bpfInitialized = false;
     this._kalman = { x: 0, p: 100, q: 0.5, r: 4, initialized: false };
-    this._activeChannel = 'g';
-    this._channelSelectTime = 0;
     this._workerResult = null;
+    
+    // OpenAPI 초기화
+    if (this._prevGray) { this._prevGray.delete(); this._prevGray = null; }
+    if (this._prevPts) { this._prevPts.delete(); this._prevPts = null; }
+    this._cumulativeY = 0;
+    this.trackedPoints = [];
     this.signalQuality = 0;
     this.isLowLight = false;
     this._noiseFloor = 0;
@@ -175,6 +179,8 @@ class BreathingAnalyzer {
   stop() {
     this.isAnalyzing = false;
     this._stopMotionSensors();
+    if (this._prevGray) { this._prevGray.delete(); this._prevGray = null; }
+    if (this._prevPts) { this._prevPts.delete(); this._prevPts = null; }
   }
 
   getElapsedSeconds() {
@@ -252,12 +258,12 @@ class BreathingAnalyzer {
 
   // ========== 적응형 밴드패스 필터 ==========
   // 고역 통과 (0.1Hz) + 저역 통과 (1.5Hz) 캐스케이드
-  _bandpassFilter(value, channel, dt) {
+  _bandpassFilter(value, dt) {
     if (dt <= 0 || dt > 1) dt = 0.033;
 
-    var hpState = this._hpf[channel];
+    var hpState = this._hpf;
 
-    // 고역 통과: fc = 0.1Hz → 느린 조명 드리프트 제거
+    // 고역 통과: fc = 0.1Hz → 느린 드리프트 제거
     var rcHp = 1.0 / (2 * Math.PI * 0.1);
     var alphaHp = rcHp / (rcHp + dt);
     var hpOut = alphaHp * (hpState.prevY + value - hpState.prevX);
@@ -267,77 +273,12 @@ class BreathingAnalyzer {
     // 저역 통과: fc = 1.5Hz → 손떨림/노이즈 제거
     var rcLp = 1.0 / (2 * Math.PI * 1.5);
     var alphaLp = dt / (rcLp + dt);
-    this._lpf[channel] += alphaLp * (hpOut - this._lpf[channel]);
+    this._lpf += alphaLp * (hpOut - this._lpf);
 
-    return this._lpf[channel];
+    return this._lpf;
   }
 
-  // ========== 다중 채널 자동 선택 ==========
-  // 프레임 밝기(조도 대용) + 채널별 SNR로 최적 채널 결정
-  _autoSelectChannel(now) {
-    // 3초마다 재평가
-    if (now - this._channelSelectTime < 3000) return;
-    this._channelSelectTime = now;
-
-    var minLen = 60;  // 최소 2초 분량
-    if (this._bufR.length < minLen) return;
-
-    var recent = minLen;
-    var channels = {
-      r: this._bufR.slice(-recent),
-      g: this._bufG.slice(-recent),
-      b: this._bufB.slice(-recent)
-    };
-
-    var bestChannel = 'g';
-    var bestScore = -1;
-
-    for (var ch in channels) {
-      var buf = channels[ch];
-      // 디트렌드 후 분산 계산 = 신호 에너지 (SNR 대용)
-      var n = buf.length;
-      var sx = 0, sy = 0, sxy = 0, sx2 = 0;
-      for (var i = 0; i < n; i++) { sx += i; sy += buf[i]; sxy += i * buf[i]; sx2 += i * i; }
-      var denom = n * sx2 - sx * sx;
-      var slope = Math.abs(denom) > 1e-10 ? (n * sxy - sx * sy) / denom : 0;
-      var intercept = (sy - slope * sx) / n;
-
-      var variance = 0;
-      for (var i = 0; i < n; i++) {
-        var d = buf[i] - (slope * i + intercept);
-        variance += d * d;
-      }
-      variance /= n;
-
-      // 조명 환경 가중치 (프레임 밝기 기반 = 조도센서 대체)
-      var weight = 1.0;
-      if (this._frameBrightness < 60) {
-        // 어두운 환경: 카메라가 게인을 올림 → R채널 SNR 우수
-        if (ch === 'r') weight = 1.4;
-        else if (ch === 'g') weight = 1.0;
-        else weight = 0.7;
-      } else if (this._frameBrightness < 150) {
-        // 실내 보통 조명: G채널 최적 (베이어 필터 2x 픽셀)
-        if (ch === 'g') weight = 1.3;
-        else if (ch === 'r') weight = 1.0;
-        else weight = 0.8;
-      } else {
-        // 밝은 환경: G채널 여전히 우수, 포화 시 B 고려
-        if (ch === 'g') weight = 1.2;
-        else if (ch === 'b') weight = 1.1;
-        else weight = 1.0;
-      }
-
-      var score = variance * weight;
-      if (score > bestScore) {
-        bestScore = score;
-        bestChannel = ch;
-      }
-    }
-
-    this._activeChannel = bestChannel;
-    this.debugInfo.channel = bestChannel;
-  }
+  // (다중 채널 자동 선택 삭제됨)
 
   // ========== 칼만 필터 (적응형) ==========
   _kalmanUpdate(measurement) {
@@ -385,9 +326,8 @@ class BreathingAnalyzer {
     else if (this._fusedMotion > 1) q -= 5;
 
     // 3. 노이즈 대비 신호 강도
-    if (this._noiseFloor > 0.001 && this._bufG.length > 30) {
-      var activeBuf = this._activeChannel === 'r' ? this._bufR : this._activeChannel === 'b' ? this._bufB : this._bufG;
-      var recent = activeBuf.slice(-30);
+    if (this._noiseFloor > 0.001 && this._signalBuf.length > 30) {
+      var recent = this._signalBuf.slice(-30);
       var sigVar = 0, sigMean = 0;
       for (var i = 0; i < recent.length; i++) sigMean += recent[i];
       sigMean /= recent.length;
@@ -413,13 +353,16 @@ class BreathingAnalyzer {
     this.signalQuality = Math.max(0, Math.min(100, q));
   }
 
-  // ========== 매 프레임: 데이터 수집 + 분석 ==========
+  // ========== 매 프레임: 데이터 수집 + 분석 (Optical Flow) ==========
   analyzeFrame(video) {
     if (!this.isAnalyzing || !this.roi) return this.lastValidBpm;
+    if (!window.openCvReady || typeof cv === 'undefined') return this.lastValidBpm;
+
     var vw = video.videoWidth, vh = video.videoHeight;
     if (!vw || !vh) return this.lastValidBpm;
 
     var now = Date.now();
+    var dt = this.timestamps.length > 0 ? (now - this.timestamps[this.timestamps.length - 1]) / 1000 : 0.033;
 
     // 프레임 캡처 (성능 축소)
     var scale = Math.min(1, 240 / vw);
@@ -428,193 +371,225 @@ class BreathingAnalyzer {
     this.canvas.height = ch;
     this.ctx.drawImage(video, 0, 0, cw, ch);
 
-    // ROI 픽셀 추출
-    var rx = Math.max(0, Math.round(this.roi.x * cw));
-    var ry = Math.max(0, Math.round(this.roi.y * ch));
-    var rw = Math.max(1, Math.min(Math.round(this.roi.w * cw), cw - rx));
-    var rh = Math.max(1, Math.min(Math.round(this.roi.h * ch), ch - ry));
-    var data = this.ctx.getImageData(rx, ry, rw, rh).data;
-    var pixelCount = data.length / 4;
+    // === OpenCV Optical Flow ===
+    // 1. 이미지 데이터 가져오기
+    var imgData = this.ctx.getImageData(0, 0, cw, ch);
+    var currMat = cv.matFromImageData(imgData);
+    var currGray = new cv.Mat();
+    cv.cvtColor(currMat, currGray, cv.COLOR_RGBA2GRAY);
 
-    // === R/G/B 채널별 평균 밝기 추출 ===
-    var totalR = 0, totalG = 0, totalB = 0;
-    for (var i = 0; i < data.length; i += 4) {
-      totalR += data[i];
-      totalG += data[i + 1];
-      totalB += data[i + 2];
-    }
-    var avgR = totalR / pixelCount;
-    var avgG = totalG / pixelCount;
-    var avgB = totalB / pixelCount;
+    // 프레임 밝기 추출 (모션 게이트용 폴백)
+    var mean = cv.mean(currGray);
+    this._frameBrightness = mean[0];
 
-    // 프레임 전체 밝기 (조도센서 대체)
-    this._frameBrightness = avgR * 0.299 + avgG * 0.587 + avgB * 0.114;
-    var brightness = avgR * 0.15 + avgG * 0.7 + avgB * 0.15; // 호환용
-
-    // === 모션 게이트 (물리 흔들림 vs 호흡 신호 구분) ===
-    var params = this.getParams();
-    var physicalShake = false;  // 물리적 카메라 흔들림 (자이로/가속도)
-    var softMotion = false;     // 영상 기반 움직임 (호흡일 수도 있음)
-
-    // 1단계: 상보 필터 융합 모션 (자이로+가속도) → 확실한 물리 흔들림
-    if (this._fusedMotion > 5) physicalShake = true;
-
-    // 2단계: 자이로 단독 (융합 불가 시 폴백) → 확실한 물리 흔들림
-    if (!physicalShake && this._gyroShakeLevel > 5) physicalShake = true;
-
-    // 3단계: 광학 흐름 → 소프트 모션 (호흡일 수 있음)
-    if (this._prevFrameData && this._prevFrameData.length === data.length) {
-      var pixelShift = 0;
-      var sampleStep = Math.max(4, Math.floor(data.length / 400)) * 4;
-      var sampleCount = 0;
-      for (var fi = 0; fi < data.length && fi < this._prevFrameData.length; fi += sampleStep) {
-        pixelShift += Math.abs(data[fi] - this._prevFrameData[fi]);
-        pixelShift += Math.abs(data[fi + 1] - this._prevFrameData[fi + 1]);
-        sampleCount++;
-      }
-      if (sampleCount > 0) {
-        pixelShift /= (sampleCount * 2);
-        // 임계값 상향: 3 → 5 (빠른 호흡의 픽셀 변화는 보통 2~4)
-        if (pixelShift > 5) softMotion = true;
-      }
-    }
-    this._prevFrameData = new Uint8ClampedArray(data);
-
-    // 4단계: 밝기 변화율 → 소프트 모션
-    if (this._prevBrightness !== null) {
-      var change = Math.abs(brightness - this._prevBrightness) / (this._prevBrightness + 0.001);
-      // 임계값의 2배 이상일 때만 (빠른 호흡은 보통 1~1.5배)
-      if (change > params.motionThreshold * 2) softMotion = true;
-    }
-
-    this._totalFrameCount++;
-
-    // === 모션 판정: 물리 흔들림 vs 소프트 모션 차등 처리 ===
+    // 모션 게이트 (물리 흔들림)
+    var physicalShake = (this._fusedMotion > 5 || (!this._fusedMotion && this._gyroShakeLevel > 5));
     if (physicalShake) {
-      // 확실한 물리 흔들림 → 프레임 스킵 + 장기간 시 버퍼 리셋
-      this._motionFrames++;
-      this._prevBrightness = brightness;
-      if (this._motionFrames > 30) {
-        // 30프레임(~1초) 연속 물리 흔들림 → 버퍼 리셋
-        this._bufR = []; this._bufG = []; this._bufB = [];
-        this.timestamps = [];
-        this._motionFrames = 0;
-        this._bpfInitialized = false;
-      }
-      return this.lastValidBpm;
+        this._motionFrames++;
+        if (this._motionFrames > 15) {
+            // 강한 흔들림 지속 -> 트래킹 초기화
+            if (this._prevPts) { this._prevPts.delete(); this._prevPts = null; }
+            this._signalBuf = [];
+            this.timestamps = [];
+            this._motionFrames = 0;
+            this._bpfInitialized = false;
+        }
+        currMat.delete(); currGray.delete();
+        return this.lastValidBpm;
     }
-
-    if (softMotion && !physicalShake) {
-      // 영상 기반 움직임만 감지 → 프레임 스킵하되 버퍼는 유지
-      // (빠른 호흡이나 자세 변화일 수 있으므로 데이터 보존)
-      this._motionFrames++;
-      this._prevBrightness = brightness;
-      // 소프트 모션은 버퍼를 절대 삭제하지 않음 — 그냥 해당 프레임만 건너뜀
-      return this.lastValidBpm;
-    }
-
     this._motionFrames = 0;
-    this._prevBrightness = brightness;
 
-    // === 적응형 밴드패스 필터 (채널별 독립) ===
-    var dt = this.timestamps.length > 0 ? (now - this.timestamps[this.timestamps.length - 1]) / 1000 : 0.033;
-
-    if (!this._bpfInitialized) {
-      this._hpf = {
-        r: { prevX: avgR, prevY: 0 },
-        g: { prevX: avgG, prevY: 0 },
-        b: { prevX: avgB, prevY: 0 }
-      };
-      this._lpf = { r: 0, g: 0, b: 0 };
-      this._bpfInitialized = true;
+    // 2. 특징점(가상 마커) 초기화
+    var needInit = false;
+    if (!this._prevGray || !this._prevPts || this.trackedPoints.length < 15) {
+        needInit = true;
     }
 
-    var filtR = this._bandpassFilter(avgR, 'r', dt);
-    var filtG = this._bandpassFilter(avgG, 'g', dt);
-    var filtB = this._bandpassFilter(avgB, 'b', dt);
+    if (needInit) {
+        if (this._prevPts) { this._prevPts.delete(); this._prevPts = null; }
+        
+        // ROI 마스크 생성
+        var mask = cv.Mat.zeros(ch, cw, cv.CV_8UC1);
+        var rx = Math.max(0, Math.round(this.roi.x * cw));
+        var ry = Math.max(0, Math.round(this.roi.y * ch));
+        var rw = Math.max(1, Math.min(Math.round(this.roi.w * cw), cw - rx));
+        var rh = Math.max(1, Math.min(Math.round(this.roi.h * ch), ch - ry));
+        var roiRect = new cv.Rect(rx, ry, rw, rh);
+        
+        // 마스크 영역 255로 칠하기
+        var roiView = mask.roi(roiRect);
+        roiView.setTo(new cv.Scalar(255));
 
-    this._bufR.push(filtR);
-    this._bufG.push(filtG);
-    this._bufB.push(filtB);
+        // 특징점 찾기 (Shi-Tomasi)
+        var p0 = new cv.Mat();
+        var maxCorners = 100;
+        var qualityLevel = 0.05;
+        var minDistance = 5;
+        cv.goodFeaturesToTrack(currGray, p0, maxCorners, qualityLevel, minDistance, mask);
+
+        mask.delete();
+        roiView.delete();
+
+        if (p0.rows > 0) {
+            this._prevPts = p0;
+            if (this._prevGray) this._prevGray.delete();
+            this._prevGray = currGray.clone();
+            
+            // UI용 점 저장
+            this.trackedPoints = [];
+            var ptr = p0.data32F;
+            for (var i = 0; i < p0.rows; i++) {
+                this.trackedPoints.push({ x: ptr[i*2] / scale, y: ptr[i*2+1] / scale });
+            }
+        }
+        
+        currMat.delete(); currGray.delete();
+        return this.lastValidBpm;
+    }
+
+    // 3. Optical Flow (Lucas-Kanade)
+    var p1 = new cv.Mat();
+    var status = new cv.Mat();
+    var err = new cv.Mat();
+    var winSize = new cv.Size(15, 15);
+    var maxLevel = 2;
+    var criteria = new cv.TermCriteria(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03);
+
+    cv.calcOpticalFlowPyrLK(this._prevGray, currGray, this._prevPts, p1, status, err, winSize, maxLevel, criteria);
+
+    // 4. 점 이동량 (Y축 displacement) 계산
+    var good_p1 = [];
+    var good_p0 = [];
+    var dyList = [];
+    this.trackedPoints = [];
+
+    var d0 = this._prevPts.data32F;
+    var d1 = p1.data32F;
+    var stat = status.data;
+
+    for (var i = 0; i < status.rows; i++) {
+        if (stat[i] === 1) {
+            var x0 = d0[i*2], y0 = d0[i*2+1];
+            var x1 = d1[i*2], y1 = d1[i*2+1];
+            
+            // 지나치게 큰 이동은 노이즈로 간주하고 버림
+            var maxMovement = ch * 0.1;
+            var dy = y1 - y0;
+            if (Math.abs(dy) < maxMovement) {
+                good_p1.push(x1, y1);
+                good_p0.push(x0, y0);
+                dyList.push(dy);
+                // UI용 스케일 원복
+                this.trackedPoints.push({ x: x1 / scale, y: y1 / scale });
+            }
+        }
+    }
+
+    // 5. 중앙값(Median) 이동량 추출하여 통합 변위에 누적
+    if (dyList.length > 0) {
+        dyList.sort(function(a,b) { return a - b; });
+        var medianDy = dyList[Math.floor(dyList.length / 2)];
+        this._cumulativeY += medianDy;
+    }
+
+    // 6. 다음 프레임을 위해 정리
+    if (good_p1.length > 0) {
+        var p1Arr = new cv.Mat(good_p1.length / 2, 1, cv.CV_32FC2);
+        p1Arr.data32F.set(good_p1);
+        this._prevPts.delete();
+        this._prevPts = p1Arr;
+    } else {
+        if (this._prevPts) { this._prevPts.delete(); this._prevPts = null; }
+    }
+    
+    this._prevGray.delete();
+    this._prevGray = currGray.clone();
+
+    p1.delete(); status.delete(); err.delete(); currMat.delete(); currGray.delete();
+
+    // 7. BPF 적용 및 버퍼 푸시
+    if (!this._bpfInitialized) {
+        this._hpf = { prevX: this._cumulativeY, prevY: 0 };
+        this._lpf = 0;
+        this._bpfInitialized = true;
+    }
+
+    var filtY = this._bandpassFilter(this._cumulativeY, dt);
+    
+    this._signalBuf.push(filtY);
     this.timestamps.push(now);
     this._validFrameCount++;
+    this._totalFrameCount++;
 
-    // 노이즈 추정: 활성 채널의 프레임간 차이 분산 추적
-    var activeFilt = this._activeChannel === 'r' ? filtR : this._activeChannel === 'b' ? filtB : filtG;
-    if (this._bufG.length > 1) {
-      var prevBuf = this._activeChannel === 'r' ? this._bufR : this._activeChannel === 'b' ? this._bufB : this._bufG;
-      var diff = activeFilt - prevBuf[prevBuf.length - 2];
-      this._noiseDiffs.push(diff * diff);
-      if (this._noiseDiffs.length > 90) this._noiseDiffs.shift();
-      if (this._noiseDiffs.length > 10) {
-        var nSum = 0;
-        for (var ni = 0; ni < this._noiseDiffs.length; ni++) nSum += this._noiseDiffs[ni];
-        this._noiseFloor = Math.sqrt(nSum / this._noiseDiffs.length);
-      }
-    }
-
-    // 신호 품질 계산 (0~100)
+    // === 신호 버퍼 유지 및 분석 (기존 코드 유지) ===
     this._updateSignalQuality();
 
-    // 버퍼 최대 90초분 유지
-    while (this.timestamps.length > 0 && now - this.timestamps[0] > 90000) {
-      this._bufR.shift(); this._bufG.shift(); this._bufB.shift();
-      this.timestamps.shift();
+    // 노이즈 추정
+    if (this._signalBuf.length > 1) {
+        var diff = filtY - this._signalBuf[this._signalBuf.length - 2];
+        this._noiseDiffs.push(diff * diff);
+        if (this._noiseDiffs.length > 90) this._noiseDiffs.shift();
+        if (this._noiseDiffs.length > 10) {
+            var nSum = 0;
+            for (var ni = 0; ni < this._noiseDiffs.length; ni++) nSum += this._noiseDiffs[ni];
+            this._noiseFloor = Math.sqrt(nSum / this._noiseDiffs.length);
+        }
     }
 
-    // 최소 데이터: 저조도에서는 더 많은 데이터 필요
+    while (this.timestamps.length > 0 && now - this.timestamps[0] > 90000) {
+        this._signalBuf.shift();
+        this.timestamps.shift();
+    }
+
+    var params = this.getParams();
     var minSec = this.isLowLight ? 8 : 5;
     var minFrames = this.isLowLight ? 60 : 40;
     if (now - this.timestamps[0] < minSec * 1000 || this.timestamps.length < minFrames) {
-      return this.lastValidBpm;
+        return this.lastValidBpm;
     }
 
-    // === 자동 채널 선택 (3초 간격) ===
-    this._autoSelectChannel(now);
+    // === 분석 실행 ===
+    var activeBuffer = this._signalBuf;
 
-    // === 분석 실행 (Worker + 메인 스레드 이중 보장) ===
-    var activeBuffer = this._activeChannel === 'r' ? this._bufR :
-                       this._activeChannel === 'b' ? this._bufB : this._bufG;
-
-    // Worker 결과 먼저 확인 (이전 프레임에서 보낸 결과)
+    // Worker 결과 먼저 확인
     if (this._workerResult) {
-      var wr = this._workerResult;
-      this._workerResult = null;
-      this._processAnalysisResult(wr);
+        var wr = this._workerResult;
+        this._workerResult = null;
+        this._processAnalysisResult(wr);
     }
 
-    // Worker 타임아웃: 2초 이상 응답 없으면 stuck 판정 → 리셋
+    // Worker 타임아웃
     if (this._workerBusy && now - this._lastWorkerPost > 2000) {
-      this._workerBusy = false;
+        this._workerBusy = false;
     }
 
-    // Worker에 새 분석 요청 (비동기, 300ms 간격)
+    // Worker 비동기 분석
     if (this._worker && !this._workerBusy && now - this._lastWorkerPost > 300) {
-      var windowMs = params.windowSec * 1000;
-      var startIdx = 0;
-      for (var i = this.timestamps.length - 1; i >= 0; i--) {
-        if (now - this.timestamps[i] > windowMs) { startIdx = i + 1; break; }
-      }
-      var sig = activeBuffer.slice(startIdx);
-      var ts = this.timestamps.slice(startIdx);
-      if (sig.length >= 30) {
-        this._workerBusy = true;
-        this._lastWorkerPost = now;
-        this._workerStartIdx = startIdx;
-        try {
-          this._worker.postMessage({ signal: sig, timestamps: ts, params: params, fps: sig.length / ((ts[ts.length - 1] - ts[0]) / 1000) });
-        } catch (e) {
-          this._workerBusy = false;
-          this._worker = null; // Worker 오류 시 폐기
+        var windowMs = params.windowSec * 1000;
+        var startIdx = 0;
+        for (var i = this.timestamps.length - 1; i >= 0; i--) {
+            if (now - this.timestamps[i] > windowMs) { startIdx = i + 1; break; }
         }
-      }
+        var sig = activeBuffer.slice(startIdx);
+        var ts = this.timestamps.slice(startIdx);
+        if (sig.length >= 30) {
+            this._workerBusy = true;
+            this._lastWorkerPost = now;
+            this._workerStartIdx = startIdx;
+            try {
+                this._worker.postMessage({ signal: sig, timestamps: ts, params: params, fps: sig.length / ((ts[ts.length - 1] - ts[0]) / 1000) });
+            } catch (e) {
+                this._workerBusy = false;
+                this._worker = null;
+            }
+        }
     }
 
-    // 메인 스레드 분석 (항상 400ms 간격으로 실행 — Worker 유무 무관)
+    // 메인 스레드 분석 (400ms 주기)
     if (now - this._lastAnalysisTime > 400) {
-      this._lastAnalysisTime = now;
-      var bpm = this._analyzeWindow(activeBuffer);
-      return this._processResult(bpm);
+        this._lastAnalysisTime = now;
+        var bpm = this._analyzeWindow(activeBuffer);
+        return this._processResult(bpm);
     }
 
     return this.lastValidBpm;

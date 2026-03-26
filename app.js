@@ -182,6 +182,21 @@
   var isMeasuring = false;
   var animId = null;
 
+  // OpenCV 콜백
+  window.openCvReady = false;
+  window.onOpenCvReady = function() {
+    window.openCvReady = true;
+    var loadMsg = $('#opencv-loading-msg');
+    var startMsg = $('#camera-start-msg');
+    var btnCamera = $('#btn-camera');
+    if (loadMsg) loadMsg.classList.add('hidden');
+    if (startMsg) startMsg.classList.remove('hidden');
+    if (btnCamera) {
+      btnCamera.disabled = false;
+      btnCamera.classList.remove('disabled');
+    }
+  };
+
   // === Wake Lock (화면 꺼짐 방지) ===
   var wakeLock = null;
   function acquireWakeLock() {
@@ -501,13 +516,11 @@
     if (displayBpm !== null) {
       $('#auto-bpm').textContent = displayBpm;
       $('#auto-bpm').className = 'bpm-number' + (displayBpm>=40?' danger':displayBpm>=30?' warning':'');
-      // 신뢰도 + 분석 채널 표시
+      // 신뢰도 표시
       var conf = analyzer.confidence || 0;
       var confLabel = conf >= 0.5 ? '높음' : conf >= 0.25 ? '보통' : '낮음';
       var statusText = displayBpm>=40?'위험! 즉시 내원!':displayBpm>=30?'주의':'정상 범위';
-      var chMap = { r: 'R', g: 'G', b: 'B' };
-      var chLabel = chMap[analyzer.debugInfo.channel] || 'G';
-      $('#auto-breath-status').textContent = statusText + ' (신뢰도: ' + confLabel + ' | CH:' + chLabel + ')';
+      $('#auto-breath-status').textContent = statusText + ' (신뢰도: ' + confLabel + ' | 모션 캡처)';
     } else {
       var sec = analyzer.getElapsedSeconds();
       if (sec < 5) {
@@ -541,6 +554,7 @@
     var rem = Math.max(0, dur - elapsed);
     $('#timer-display').textContent = Math.floor(rem/60) + ':' + (rem%60 < 10 ? '0' : '') + (rem%60);
     drawWave();
+    drawTrackingPoints();
     animId = requestAnimationFrame(autoLoop);
   }
 
@@ -612,6 +626,21 @@
         ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill();
       }
     });
+  }
+
+  function drawTrackingPoints() {
+    if (!currentROI || !isMeasuring) return;
+    drawROIRect(currentROI);
+    if (!analyzer.trackedPoints || analyzer.trackedPoints.length === 0) return;
+    
+    var w = overlayCanvas.width, h = overlayCanvas.height;
+    overlayCtx.fillStyle = '#ffeb3b';
+    for (var i = 0; i < analyzer.trackedPoints.length; i++) {
+        var pt = analyzer.trackedPoints[i];
+        overlayCtx.beginPath();
+        overlayCtx.arc(pt.x * w, pt.y * h, 3, 0, 2 * Math.PI);
+        overlayCtx.fill();
+    }
   }
 
   function setAutoStatus(text, state) {
