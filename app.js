@@ -281,12 +281,23 @@
         videoTrack = stream.getVideoTracks()[0];
         $('#no-camera').classList.add('hidden');
         $('#btn-camera').textContent = '카메라 중지';
-        $('#btn-roi').classList.remove('hidden');
+        $('#btn-roi').classList.add('hidden');
+        $('#btn-auto-measure').classList.add('hidden');
         $('#light-controls').classList.remove('hidden');
-        setAutoStatus('영역을 선택하세요', 'ready');
+        setAutoStatus('카메라 안정화 중...', 'ready');
+        
+        // 카메라를 켜면 자동으로 화면 중앙 70%를 관심영역으로 설정
+        currentROI = { x: 0.15, y: 0.15, w: 0.7, h: 0.7 };
+        analyzer.setROI(currentROI);
+        
         fitOverlay();
         window.addEventListener('resize', fitOverlay);
         checkFlashCapability();
+        
+        // 1초 뒤 자동 측정 시작
+        setTimeout(function() {
+            if (stream) startAutoMeasure();
+        }, 1000);
       }).catch(function(e) {
         showAlert('카메라 오류', '카메라에 접근할 수 없습니다.', '브라우저 설정에서 카메라 권한을 허용해주세요.\n\n' + (e.message || e));
       });
@@ -499,7 +510,7 @@
     overlayCtx.fillText(label, rx+6, ry-5);
   }
 
-  // --- 자동 측정 ---
+  // --- 자동 측정 (버튼은 숨김 처리) ---
   $('#btn-auto-measure').addEventListener('click', startAutoMeasure);
   $('#btn-auto-stop').addEventListener('click', function() { stopAutoMeasure(true); });
 
@@ -598,9 +609,7 @@
     $('#btn-auto-stop').classList.add('hidden');
     $('#timer-display').classList.add('hidden');
     if (stream) {
-      $('#btn-auto-measure').classList.remove('hidden');
-      $('#btn-roi').classList.remove('hidden');
-      setAutoStatus('측정 준비 완료', 'ready');
+      setAutoStatus('측정 대기', 'ready');
     }
     if (currentROI) drawROIRect(currentROI);
 
@@ -656,16 +665,38 @@
 
   function drawTrackingPoints() {
     if (!currentROI || !isMeasuring) return;
+    
+    // 점과 선만 그리고 영역 박스는 모션 캡처 느낌을 위해 희미하게
     drawROIRect(currentROI);
+    
     if (!analyzer.trackedPoints || analyzer.trackedPoints.length === 0) return;
     
     var w = overlayCanvas.width, h = overlayCanvas.height;
-    overlayCtx.fillStyle = '#ffeb3b';
+    
     for (var i = 0; i < analyzer.trackedPoints.length; i++) {
         var pt = analyzer.trackedPoints[i];
+        var x0 = pt.x0 * w, y0 = pt.y0 * h;
+        var x1 = pt.x1 * w, y1 = pt.y1 * h;
+        
+        // 이동 변화율을 시각적으로 과장해서 벡터 선 그리기
+        var vx = (x1 - x0) * 15;
+        var vy = (y1 - y0) * 15;
+        var tx = x1 + vx;
+        var ty = y1 + vy;
+
+        // 초록색 점
+        overlayCtx.fillStyle = '#00ff00';
         overlayCtx.beginPath();
-        overlayCtx.arc(pt.x * w, pt.y * h, 3, 0, 2 * Math.PI);
+        overlayCtx.arc(x1, y1, 2.5, 0, 2 * Math.PI);
         overlayCtx.fill();
+
+        // 초록색 꼬리 선 (모션 벡터)
+        overlayCtx.strokeStyle = 'rgba(0, 255, 0, 0.7)';
+        overlayCtx.lineWidth = 1.5;
+        overlayCtx.beginPath();
+        overlayCtx.moveTo(x0, y0);
+        overlayCtx.lineTo(tx, ty);
+        overlayCtx.stroke();
     }
   }
 

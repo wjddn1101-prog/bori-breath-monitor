@@ -383,7 +383,8 @@ class BreathingAnalyzer {
     this._frameBrightness = mean[0];
 
     // 모션 게이트 (물리 흔들림)
-    var physicalShake = (this._fusedMotion > 5 || (!this._fusedMotion && this._gyroShakeLevel > 5));
+    // 모바일 환경에서 손떨림으로 인해 끊임없이 추적이 초기화되는 것을 막기 위해 임계값 상향
+    var physicalShake = (this._fusedMotion > 12 || (!this._fusedMotion && this._gyroShakeLevel > 12));
     if (physicalShake) {
         this._motionFrames++;
         if (this._motionFrames > 15) {
@@ -479,8 +480,8 @@ class BreathingAnalyzer {
                 good_p1.push(x1, y1);
                 good_p0.push(x0, y0);
                 dyList.push(dy);
-                // UI용 스케일 원복
-                this.trackedPoints.push({ x: x1 / scale, y: y1 / scale });
+                // UI 시각화용 이전, 현재 좌표 모두 저장
+                this.trackedPoints.push({ x0: x0 / scale, y0: y0 / scale, x1: x1 / scale, y1: y1 / scale });
             }
         }
     }
