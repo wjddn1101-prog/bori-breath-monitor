@@ -197,6 +197,11 @@
     }
   };
 
+  // 비동기로 미리 로드되었을 경우 즉시 초기화
+  if (window.openCvReadyFlag) {
+    window.onOpenCvReady();
+  }
+
   // === Wake Lock (화면 꺼짐 방지) ===
   var wakeLock = null;
   function acquireWakeLock() {

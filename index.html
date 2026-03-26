@@ -284,8 +284,19 @@
 
   </div>
 
-  <!-- OpenCV.js 로딩 스크립트 -->
-  <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="window.onOpenCvReady();" type="text/javascript"></script>
+  <!-- OpenCV.js 모듈 및 로딩 스크립트 -->
+  <script>
+    var Module = {
+      onRuntimeInitialized: function() {
+        if (typeof window.onOpenCvReady === 'function') {
+          window.onOpenCvReady();
+        } else {
+          window.openCvReadyFlag = true;
+        }
+      }
+    };
+  </script>
+  <script async src="https://docs.opencv.org/4.8.0/opencv.js" type="text/javascript"></script>
   <script src="breathing-analyzer.js"></script>
   <script src="app.js"></script>
   <script>
