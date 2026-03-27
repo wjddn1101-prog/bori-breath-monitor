@@ -665,39 +665,36 @@
 
   function drawTrackingPoints() {
     if (!currentROI || !isMeasuring) return;
-    
-    // 점과 선만 그리고 영역 박스는 모션 캡처 느낌을 위해 희미하게
+
     drawROIRect(currentROI);
-    
+
     if (!analyzer.trackedPoints || analyzer.trackedPoints.length === 0) return;
-    
+
     var w = overlayCanvas.width, h = overlayCanvas.height;
-    
+
+    // 신호 품질에 따라 점 색상 변경
+    var sq = analyzer.signalQuality || 0;
+    var dotColor = sq > 60 ? 'rgba(0, 255, 100, 0.8)' : sq > 30 ? 'rgba(255, 200, 0, 0.8)' : 'rgba(255, 80, 80, 0.8)';
+
     for (var i = 0; i < analyzer.trackedPoints.length; i++) {
         var pt = analyzer.trackedPoints[i];
-        var x0 = pt.x0 * w, y0 = pt.y0 * h;
-        var x1 = pt.x1 * w, y1 = pt.y1 * h;
-        
-        // 이동 변화율을 시각적으로 과장해서 벡터 선 그리기
-        var vx = (x1 - x0) * 15;
-        var vy = (y1 - y0) * 15;
-        var tx = x1 + vx;
-        var ty = y1 + vy;
+        var x = pt.x1 * w, y = pt.y1 * h;
 
-        // 초록색 점
-        overlayCtx.fillStyle = '#00ff00';
+        // ROI 격자 분석점 표시
+        overlayCtx.fillStyle = dotColor;
         overlayCtx.beginPath();
-        overlayCtx.arc(x1, y1, 2.5, 0, 2 * Math.PI);
+        overlayCtx.arc(x, y, 3, 0, 2 * Math.PI);
         overlayCtx.fill();
-
-        // 초록색 꼬리 선 (모션 벡터)
-        overlayCtx.strokeStyle = 'rgba(0, 255, 0, 0.7)';
-        overlayCtx.lineWidth = 1.5;
-        overlayCtx.beginPath();
-        overlayCtx.moveTo(x0, y0);
-        overlayCtx.lineTo(tx, ty);
-        overlayCtx.stroke();
     }
+
+    // 채널 정보 표시
+    var ch = analyzer.debugInfo.channel || 'g';
+    var chLabel = ch === 'r' ? 'R채널' : ch === 'b' ? 'B채널' : 'G채널';
+    overlayCtx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    overlayCtx.fillRect(4, h - 22, 70, 18);
+    overlayCtx.fillStyle = '#fff';
+    overlayCtx.font = '11px sans-serif';
+    overlayCtx.fillText('밝기분석 ' + chLabel, 8, h - 8);
   }
 
   function setAutoStatus(text, state) {
