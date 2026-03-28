@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "sonnet",
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(node:*)",
+      "Edit",
+      "Read",
+      "Write",
+      "Glob",
+      "Grep"
+    ],
+    "deny": [
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '🐾 보리 호흡 모니터 세션 시작' && echo '브랜치: '$(git -C /home/user/bori-breath-monitor branch --show-current 2>/dev/null || echo '알 수 없음') && echo '핵심 파일: breathing-analyzer.js | app.js | ml-classifier.js'"
+          }
+        ]
+      }
+    ]
+  }
+}
