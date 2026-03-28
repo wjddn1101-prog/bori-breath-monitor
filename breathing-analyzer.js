@@ -86,6 +86,22 @@ class BreathingAnalyzer {
     this._initWorker();
 
     this._lastAnalysisTime = 0;
+
+    // === Phase 1: 스마트 ROI 자동 탐지 ===
+    this._roiUserSet = false;
+    this._roiScanActive = false;
+    this._roiScanStart = null;
+    this._roiScanDuration = 5000;
+    this._candidateROIs = [];
+    this._candidateSigs = [];
+    this.onRoiFound = null;  // 콜백: function(roi)
+
+    // === Phase 2: 적응 학습 ===
+    this._mlDataKey = 'bori_ml_data';
+
+    // === Phase 3: TF.js 분류기 ===
+    this._classifier = null;
+    this._mlSuppressCount = 0;
   }
 
   // ========== 감도 파라미터 (저조도 적응형) ==========
@@ -138,7 +154,7 @@ class BreathingAnalyzer {
     return adj;
   }
 
-  setROI(roi) { this.roi = roi; }
+  setROI(roi, userSet) { this.roi = roi; this._roiUserSet = !!userSet; }
   setSensitivity(s) { this.sensitivity = s; }
 
   start() {
@@ -179,6 +195,13 @@ class BreathingAnalyzer {
     this._lastWorkerPost = 0;
     this._lastAnalysisTime = 0;
     this.debugInfo = { acBpm: null, fftBpm: null, peakBpm: null, channel: 'g' };
+
+    // ROI 스캔 초기화 (사용자가 수동으로 ROI를 지정하지 않은 경우만)
+    this._roiScanActive = !this._roiUserSet;
+    this._roiScanStart = null;
+    this._candidateSigs = [];
+    if (this._roiScanActive) this._initCandidateROIs();
+    this._mlSuppressCount = 0;
 
     this._startMotionSensors();
   }
@@ -527,6 +550,17 @@ class BreathingAnalyzer {
 
     var imgData = this.ctx.getImageData(0, 0, cw, ch);
 
+    // === Phase 1: ROI 스캔 모드 — 9개 후보 영역 밝기 수집 ===
+    if (this._roiScanActive) {
+      if (!this._roiScanStart) this._roiScanStart = now;
+      for (var ci = 0; ci < this._candidateROIs.length; ci++) {
+        this._candidateSigs[ci].push(this._extractROIGreen(imgData, cw, ch, this._candidateROIs[ci]));
+      }
+      if (now - this._roiScanStart >= this._roiScanDuration) {
+        this._finalizeScan();
+      }
+    }
+
     // === OpenCV: 그레이스케일 + 글로벌 모션 추정 ===
     var currMat = cv.matFromImageData(imgData);
     var currGray = new cv.Mat();
@@ -700,8 +734,19 @@ class BreathingAnalyzer {
     return this._processResult(wr.bpm);
   }
 
-  // BPM 결과 → 칼만 필터 → 반환
+  // BPM 결과 → (Phase 3) ML 분류기 체크 → 칼만 필터 → 반환
   _processResult(bpm) {
+    // Phase 3: TF.js 분류기로 노이즈 신호 억제
+    if (bpm !== null && this._classifier && this._classifier.isReady && this.smoothedSignal.length > 50) {
+      var mlConf = this._classifier.predict(this.smoothedSignal);
+      if (mlConf < 0.35) {
+        this._mlSuppressCount++;
+        bpm = null;
+      } else {
+        this._mlSuppressCount = 0;
+      }
+    }
+
     if (bpm !== null) {
       bpm = this._kalmanUpdate(bpm);
       this.lastValidBpm = bpm;
@@ -1022,6 +1067,103 @@ class BreathingAnalyzer {
       out[i] = sum / c;
     }
     return out;
+  }
+
+  // ========== Phase 1: 스마트 ROI 자동 탐지 ==========
+
+  _initCandidateROIs() {
+    this._candidateROIs = [];
+    this._candidateSigs = [];
+    var sz = 0.28;
+    // 3×3 그리드: x, y 시작 위치 (sz 만큼의 크기)
+    var pos = [0.05, 0.36, 0.67];
+    for (var r = 0; r < 3; r++) {
+      for (var c = 0; c < 3; c++) {
+        this._candidateROIs.push({ x: pos[c], y: pos[r], w: sz, h: sz });
+        this._candidateSigs.push([]);
+      }
+    }
+  }
+
+  // 빠른 Green 채널 평균 추출 (2픽셀 간격 샘플링)
+  _extractROIGreen(imgData, cw, ch, roi) {
+    var rx = Math.max(0, Math.round(roi.x * cw));
+    var ry = Math.max(0, Math.round(roi.y * ch));
+    var rw = Math.max(1, Math.round(roi.w * cw));
+    var rh = Math.max(1, Math.round(roi.h * ch));
+    rx = Math.min(rx, cw - rw);
+    ry = Math.min(ry, ch - rh);
+    var data = imgData.data;
+    var sumG = 0, count = 0;
+    for (var y = ry; y < ry + rh; y += 2) {
+      for (var x = rx; x < rx + rw; x += 2) {
+        sumG += data[(y * cw + x) * 4 + 1];
+        count++;
+      }
+    }
+    return count > 0 ? sumG / count : 128;
+  }
+
+  // 신호에서 호흡 주파수(0.1–1.0Hz) 에너지 계산 → 높을수록 가슴 부위
+  _scoreROISignal(sig) {
+    if (sig.length < 20) return 0;
+    var n = sig.length;
+    var mean = 0;
+    for (var i = 0; i < n; i++) mean += sig[i];
+    mean /= n;
+
+    var hp = { px: sig[0] - mean, py: 0 }, lp = 0;
+    var aHp = (1.0 / (2 * Math.PI * 0.1)) / ((1.0 / (2 * Math.PI * 0.1)) + 0.033);
+    var aLp = 0.033 / ((1.0 / (2 * Math.PI * 1.0)) + 0.033);
+    var filtered = [];
+    for (var i = 0; i < n; i++) {
+      var v = sig[i] - mean;
+      var hpOut = aHp * (hp.py + v - hp.px);
+      hp.px = v; hp.py = hpOut;
+      lp += aLp * (hpOut - lp);
+      filtered.push(lp);
+    }
+
+    var fmean = 0;
+    for (var i = 0; i < n; i++) fmean += filtered[i];
+    fmean /= n;
+    var variance = 0;
+    for (var i = 0; i < n; i++) variance += (filtered[i] - fmean) * (filtered[i] - fmean);
+    return variance / n;
+  }
+
+  // 5초 스캔 완료 → 최고 에너지 ROI 선택
+  _finalizeScan() {
+    this._roiScanActive = false;
+    var bestScore = -1;
+    var bestIdx = 4;  // 기본: 중앙 셀
+    for (var i = 0; i < this._candidateSigs.length; i++) {
+      var score = this._scoreROISignal(this._candidateSigs[i]);
+      if (score > bestScore) { bestScore = score; bestIdx = i; }
+    }
+    this.roi = this._candidateROIs[bestIdx];
+    if (this.onRoiFound) this.onRoiFound(this.roi);
+  }
+
+  // ========== Phase 2: 적응 학습 파라미터 로드 ==========
+
+  // 비슷한 조도 환경에서 성공한 감도 설정을 추천
+  loadAdaptiveParams(lightLevel) {
+    try {
+      var stored = JSON.parse(localStorage.getItem(this._mlDataKey) || '{"version":1,"samples":[]}');
+      var samples = (stored.samples || []).filter(function(s) {
+        return Math.abs((s.lightLevel || 80) - lightLevel) <= 25;
+      });
+      if (samples.length < 3) return null;
+      var sensCount = {};
+      samples.forEach(function(s) {
+        sensCount[s.sensitivity] = (sensCount[s.sensitivity] || 0) + 1;
+      });
+      var bestSens = Object.keys(sensCount).reduce(function(a, b) {
+        return sensCount[a] >= sensCount[b] ? a : b;
+      });
+      return { sensitivity: bestSens, sampleCount: samples.length };
+    } catch (e) { return null; }
   }
 }
 

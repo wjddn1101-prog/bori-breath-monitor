@@ -1,10 +1,12 @@
-const CACHE_NAME = 'bori-breath-v5';
+const CACHE_NAME = 'bori-breath-v7';
 const ASSETS = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './breathing-analyzer.js',
+  './analysis-worker.js',
+  './ml-classifier.js',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',

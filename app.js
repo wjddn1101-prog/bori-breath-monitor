@@ -177,6 +177,7 @@
   //  자동 영상분석 모드
   // =============================================
   var analyzer = new BreathingAnalyzer();
+  window._analyzerInstance = analyzer;  // Phase 3: TF.js 분류기 주입용
   var stream = null;
   var videoTrack = null;
   var isMeasuring = false;
@@ -288,7 +289,7 @@
         
         // 카메라를 켜면 자동으로 화면 중앙 70%를 관심영역으로 설정
         currentROI = { x: 0.15, y: 0.15, w: 0.7, h: 0.7 };
-        analyzer.setROI(currentROI);
+        analyzer.setROI(currentROI, false);  // userSet=false → 측정 시 ROI 자동 탐색 실행
         
         fitOverlay();
         window.addEventListener('resize', fitOverlay);
@@ -462,7 +463,7 @@
     if (roi.w < 0.05 || roi.h < 0.05) { roiStartPt = null; return; }
 
     currentROI = roi;
-    analyzer.setROI(roi);
+    analyzer.setROI(roi, true);  // userSet=true → 사용자 지정 ROI 유지
     exitROIMode();
     drawROIRect(roi);
     $('#btn-auto-measure').classList.remove('hidden');
@@ -518,7 +519,28 @@
     isMeasuring = true;
     autoBpmHistory = [];
     currentAutoBpm = null;
+
+    // Phase 2: 적응 학습 — 비슷한 조도 환경에서의 성공 파라미터 로드
+    var adaptiveP = analyzer.loadAdaptiveParams(analyzer._frameBrightness || 80);
+    if (adaptiveP && adaptiveP.sampleCount >= 3) {
+      $('#sensitivity').value = adaptiveP.sensitivity;
+      var badge = $('#adaptive-badge');
+      if (badge) badge.classList.remove('hidden');
+    } else {
+      var badge = $('#adaptive-badge');
+      if (badge) badge.classList.add('hidden');
+    }
+
     analyzer.setSensitivity($('#sensitivity').value);
+
+    // Phase 1: ROI 자동 탐색 콜백 설정
+    analyzer.onRoiFound = function(roi) {
+      currentROI = roi;
+      drawROIRect(roi);
+      var scanStatus = $('#roi-scan-status');
+      if (scanStatus) scanStatus.classList.add('hidden');
+    };
+
     analyzer.start();
     acquireWakeLock();
 
@@ -532,6 +554,12 @@
     $('#timer-display').classList.remove('hidden');
     setAutoStatus('측정 중...', 'measuring');
     drawROIRect(currentROI);
+
+    // Phase 1: ROI 스캔 모드이면 탐색 상태 표시
+    if (!analyzer._roiUserSet) {
+      var scanStatus = $('#roi-scan-status');
+      if (scanStatus) scanStatus.classList.remove('hidden');
+    }
 
     var duration = parseInt($('#measure-duration').value);
     autoTimerId = setTimeout(function() { stopAutoMeasure(true); }, duration * 1000);
@@ -723,6 +751,24 @@
     $('#result-memo').value = '';
     modal.classList.remove('hidden');
 
+    // Phase 2: 피드백 버튼 — 측정이 정확한지 여부 기록
+    var feedbackRow = $('#result-feedback-row');
+    if (feedbackRow) feedbackRow.classList.remove('hidden');
+    var feedbackDone = false;
+    function onFeedback(isCorrect) {
+      if (feedbackDone) return;
+      feedbackDone = true;
+      saveMLData(bpm, method, isCorrect);
+      var correctBtn = $('#result-correct');
+      var incorrectBtn = $('#result-incorrect');
+      if (correctBtn) correctBtn.classList.toggle('selected', isCorrect);
+      if (incorrectBtn) incorrectBtn.classList.toggle('selected', !isCorrect);
+    }
+    var correctBtn = $('#result-correct');
+    var incorrectBtn = $('#result-incorrect');
+    if (correctBtn) correctBtn.onclick = function() { onFeedback(true); };
+    if (incorrectBtn) incorrectBtn.onclick = function() { onFeedback(false); };
+
     $('#result-save').onclick = function() {
       saveRecord({
         date: now.toISOString(), bpm: bpm, duration: duration, method: method,
@@ -736,6 +782,34 @@
       }
     };
     $('#result-discard').onclick = function() { modal.classList.add('hidden'); };
+  }
+
+  // Phase 2: ML 학습 데이터 저장
+  function saveMLData(bpm, method, isCorrect) {
+    try {
+      var stored = JSON.parse(localStorage.getItem('bori_ml_data') || '{"version":1,"samples":[]}');
+      if (!stored.samples) stored.samples = [];
+      stored.samples.push({
+        bpm: bpm,
+        method: method,
+        sensitivity: $('#sensitivity').value,
+        lightLevel: Math.round(analyzer._frameBrightness || 80),
+        channel: (analyzer.debugInfo && analyzer.debugInfo.channel) || 'g',
+        quality: analyzer.signalQuality || 0,
+        correct: isCorrect,
+        timestamp: Date.now()
+      });
+      if (stored.samples.length > 200) stored.samples = stored.samples.slice(-200);
+      localStorage.setItem('bori_ml_data', JSON.stringify(stored));
+
+      // Phase 3: TF.js 분류기 피드백 학습
+      if (window.breathingClassifier && window.breathingClassifier.isReady) {
+        window.breathingClassifier.addFeedback(analyzer.smoothedSignal || [], isCorrect);
+        window.breathingClassifier.retrain();
+      }
+    } catch (e) {
+      console.warn('ML 데이터 저장 오류:', e);
+    }
   }
 
   function showAlert(title, msg, details) {
