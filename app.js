@@ -269,11 +269,6 @@
         '\n\nSafari에서 https:// 주소로 접속해주세요.');
       return;
     }
-    // 기존 스트림 재사용 — iOS Safari 권한 재요청 방지
-    if (stream) {
-      _onStreamReady(stream);
-      return;
-    }
     var facingMode = $('#camera-select').value;
     try {
       navigator.mediaDevices.getUserMedia({
@@ -318,7 +313,13 @@
 
   function stopCamera() {
     if (flashOn) toggleFlash();
-    // 스트림은 유지 — iOS Safari 권한 재요청 방지 (재시작 시 기존 스트림 재사용)
+    stopAutoMeasure();
+    // 모든 트랙 완전 종료 — 카메라 LED 끄기
+    if (stream) {
+      stream.getTracks().forEach(function(t) { t.stop(); });
+      stream = null;
+    }
+    videoTrack = null;
     video.pause();
     video.srcObject = null;
     $('#no-camera').classList.remove('hidden');
@@ -331,7 +332,6 @@
     setBrightness(0);
     currentROI = null;
     setAutoStatus('카메라를 시작하세요', 'idle');
-    stopAutoMeasure();
   }
 
   function fitOverlay() {
@@ -709,23 +709,97 @@
     if (!analyzer.trackedPoints || analyzer.trackedPoints.length === 0) return;
 
     var w = overlayCanvas.width, h = overlayCanvas.height;
-
-    // 신호 품질에 따라 점 색상 변경
     var sq = analyzer.signalQuality || 0;
-    var dotColor = sq > 60 ? 'rgba(0, 255, 100, 0.8)' : sq > 30 ? 'rgba(255, 200, 0, 0.8)' : 'rgba(255, 80, 80, 0.8)';
+    var sigNorm = analyzer._vizSignalNorm || 0;       // -1 ~ +1 (현재 신호 위상)
+    var sigRising = analyzer._vizSignalRising || false;
+    var sigAmp = analyzer._vizSignalAmplitude || 0;
 
-    for (var i = 0; i < analyzer.trackedPoints.length; i++) {
-        var pt = analyzer.trackedPoints[i];
-        var x = pt.x1 * w, y = pt.y1 * h;
-
-        // ROI 격자 분석점 표시
-        overlayCtx.fillStyle = dotColor;
-        overlayCtx.beginPath();
-        overlayCtx.arc(x, y, 3, 0, 2 * Math.PI);
-        overlayCtx.fill();
+    // 피크 근처 여부 확인 (최근 5프레임 이내에 피크가 있으면 true)
+    var hasPeak = false;
+    if (analyzer.peaks.length > 0) {
+      var lastPeak = analyzer.peaks[analyzer.peaks.length - 1];
+      var offset = analyzer._windowStartIdx || 0;
+      hasPeak = (offset + (analyzer.smoothedSignal.length || 0) - lastPeak) < 8;
     }
 
-    // 채널 정보 표시
+    // 점 크기: 신호 진폭 비례 (2.5~6.5px), 신호 없으면 최소
+    var baseRadius = 2.5;
+    var dynamicRadius = sigAmp > 0.0005
+      ? baseRadius + Math.min(Math.abs(sigNorm) * 4, 4)
+      : baseRadius;
+
+    // 색상 결정
+    var dotColor;
+    if (sq < 30) {
+      dotColor = 'rgba(255, 80, 80, 0.75)';
+    } else if (sq < 55) {
+      dotColor = 'rgba(255, 200, 0, 0.8)';
+    } else if (hasPeak) {
+      dotColor = 'rgba(80, 255, 150, 1.0)';   // 피크: 선명한 녹색
+    } else if (sigRising) {
+      dotColor = 'rgba(50, 230, 110, 0.9)';   // 상승(들숨): 밝은 녹색
+    } else {
+      dotColor = 'rgba(0, 170, 70, 0.75)';    // 하강(날숨): 어두운 녹색
+    }
+
+    // 피크 시 glow 효과
+    if (hasPeak && sq >= 50) {
+      overlayCtx.shadowColor = 'rgba(50, 255, 120, 0.9)';
+      overlayCtx.shadowBlur = 14;
+    } else {
+      overlayCtx.shadowBlur = 0;
+    }
+
+    overlayCtx.fillStyle = dotColor;
+    for (var i = 0; i < analyzer.trackedPoints.length; i++) {
+      var pt = analyzer.trackedPoints[i];
+      // sigNorm에 따라 y 오프셋 (호흡 움직임 방향 표현, 최대 ±5px)
+      var yOff = sigNorm * 5;
+      overlayCtx.beginPath();
+      overlayCtx.arc(pt.x1 * w, pt.y1 * h + yOff, dynamicRadius, 0, 2 * Math.PI);
+      overlayCtx.fill();
+    }
+    overlayCtx.shadowBlur = 0;
+
+    // ROI 중앙 상단: 호흡 방향 화살표
+    if (sq >= 50 && sigAmp > 0.0005) {
+      var arrow = Math.abs(sigNorm) > 0.3 ? (sigRising ? '▲' : '▼') : '●';
+      var arrowColor = sigRising ? 'rgba(80,255,150,0.95)' : 'rgba(0,200,80,0.8)';
+      var rx = currentROI.x * w, ry = currentROI.y * h, rw2 = currentROI.w * w;
+      overlayCtx.fillStyle = 'rgba(0,0,0,0.55)';
+      overlayCtx.fillRect(rx + rw2/2 - 14, ry + 4, 28, 20);
+      overlayCtx.fillStyle = arrowColor;
+      overlayCtx.font = 'bold 13px sans-serif';
+      overlayCtx.textAlign = 'center';
+      overlayCtx.fillText(arrow, rx + rw2/2, ry + 19);
+      overlayCtx.textAlign = 'left';
+    }
+
+    // 흔들림 알림 표시
+    var now = Date.now();
+    var resetAge = now - (analyzer._motionResetTime || 0);
+    var showReset = resetAge < 3000;  // 리셋 후 3초간 표시
+    var showModerate = analyzer._isModerateShake;
+
+    if (showReset || showModerate) {
+      var bannerText = showReset ? '흔들림으로 데이터 초기화됨' : '흔들림 감지 — 잠시 고정해주세요';
+      var bannerBg = showReset ? 'rgba(220, 60, 60, 0.88)' : 'rgba(200, 140, 0, 0.82)';
+      var bannerW = 210;
+      var bannerX = (w - bannerW) / 2;
+      var bannerY = h / 2 - 14;
+      overlayCtx.fillStyle = bannerBg;
+      overlayCtx.beginPath();
+      overlayCtx.roundRect ? overlayCtx.roundRect(bannerX, bannerY, bannerW, 26, 6)
+        : overlayCtx.rect(bannerX, bannerY, bannerW, 26);
+      overlayCtx.fill();
+      overlayCtx.fillStyle = '#fff';
+      overlayCtx.font = 'bold 12px sans-serif';
+      overlayCtx.textAlign = 'center';
+      overlayCtx.fillText(bannerText, w / 2, bannerY + 17);
+      overlayCtx.textAlign = 'left';
+    }
+
+    // 하단 채널 정보
     var ch = analyzer.debugInfo.channel || 'g';
     var chLabel = ch === 'r' ? 'R채널' : ch === 'b' ? 'B채널' : 'G채널';
     overlayCtx.fillStyle = 'rgba(0, 0, 0, 0.6)';

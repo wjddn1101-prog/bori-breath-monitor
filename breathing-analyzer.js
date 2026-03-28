@@ -131,16 +131,20 @@ class BreathingAnalyzer {
       adj.minCycles = Math.max(base.minCycles, 5);
       adj.motionThreshold = base.motionThreshold * 1.8;
       adj.acThreshold = Math.max(base.acThreshold, 0.20);
+      adj.maxBpm = Math.max(base.maxBpm, 50); // 소형견 저조도 대응
     } else if (b < 60) {
-      adj.smoothW = Math.max(base.smoothW, 11);
-      adj.windowSec = Math.max(base.windowSec, 35);
-      adj.minCycles = Math.max(base.minCycles, 4);
-      adj.motionThreshold = base.motionThreshold * 1.4;
-      adj.acThreshold = Math.max(base.acThreshold, 0.18);
-    } else {
+      // 플래시 최소 밝기(아이폰 torch 최소) 구간 — 신호 약화 보상
       adj.smoothW = Math.max(base.smoothW, 9);
-      adj.windowSec = Math.max(base.windowSec, 32);
+      adj.windowSec = Math.max(base.windowSec, 30);
+      adj.minCycles = Math.max(base.minCycles, 3);
+      adj.motionThreshold = base.motionThreshold * 1.4;
+      adj.acThreshold = Math.max(base.acThreshold, 0.15);
+      adj.maxBpm = Math.max(base.maxBpm, 55); // 소형견 빠른 호흡 포함
+    } else if (b < 80) {
+      adj.smoothW = Math.max(base.smoothW, 7);
+      adj.windowSec = Math.max(base.windowSec, 25);
       adj.motionThreshold = base.motionThreshold * 1.2;
+      adj.maxBpm = Math.max(base.maxBpm, 55);
     }
 
     if (b < 40) {
@@ -195,6 +199,8 @@ class BreathingAnalyzer {
     this._lastWorkerPost = 0;
     this._lastAnalysisTime = 0;
     this.debugInfo = { acBpm: null, fftBpm: null, peakBpm: null, channel: 'g' };
+    this._motionResetTime = 0;   // 마지막 신호 리셋 시각 (ms)
+    this._isModerateShake = false; // 현재 중간 흔들림 여부
 
     // ROI 스캔 초기화 (사용자가 수동으로 ROI를 지정하지 않은 경우만)
     this._roiScanActive = !this._roiUserSet;
@@ -294,8 +300,8 @@ class BreathingAnalyzer {
     hpState.prevX = value;
     hpState.prevY = hpOut;
 
-    // 저역 통과: fc = 1.0Hz → 호흡 대역만 통과 (v5의 1.5Hz에서 하향)
-    var rcLp = 1.0 / (2 * Math.PI * 1.0);
+    // 저역 통과: fc = 1.3Hz → 소형견 빠른 호흡 대역까지 포함
+    var rcLp = 1.0 / (2 * Math.PI * 1.3);
     var alphaLp = dt / (rcLp + dt);
     this._lpf += alphaLp * (hpOut - this._lpf);
 
@@ -480,7 +486,7 @@ class BreathingAnalyzer {
     };
   }
 
-  // UI용 시각화 점 생성 (ROI 격자)
+  // UI용 시각화 점 생성 (ROI 격자) + 신호값 노출
   _updateVisualization(rx, ry, rw, rh, cw, ch) {
     this.trackedPoints = [];
     var cols = 6, rows = 4;
@@ -490,6 +496,20 @@ class BreathingAnalyzer {
         var py = (ry + rh * (r + 0.5) / rows) / ch;
         this.trackedPoints.push({ x0: px, y0: py, x1: px, y1: py });
       }
+    }
+    // 최근 신호 상태 계산 (drawTrackingPoints에서 동적 시각화용)
+    var recent = this._signalBuf.slice(-20);
+    if (recent.length > 2) {
+      var maxAbs = 0.0001;
+      for (var i = 0; i < recent.length; i++) { var a = Math.abs(recent[i]); if (a > maxAbs) maxAbs = a; }
+      this._vizSignalNorm = recent[recent.length - 1] / maxAbs; // -1 ~ +1
+      this._vizSignalAmplitude = maxAbs;
+      // 상승/하강 방향
+      this._vizSignalRising = recent[recent.length - 1] > recent[recent.length - 3];
+    } else {
+      this._vizSignalNorm = 0;
+      this._vizSignalAmplitude = 0;
+      this._vizSignalRising = false;
     }
   }
 
@@ -570,24 +590,37 @@ class BreathingAnalyzer {
     var mean = cv.mean(currGray);
     this._frameBrightness = mean[0];
 
-    // 모션 게이트 (심한 흔들림만 차단 — 밝기 분석은 가벼운 떨림에 강건)
-    var physicalShake = (this._fusedMotion > 15 || (!this._fusedMotion && this._gyroShakeLevel > 15));
-    if (physicalShake) {
+    // 모션 게이트 — 3단계: 강한 흔들림(신호 리셋), 중간 흔들림(프레임 skip), 정상
+    var strongShake = (this._fusedMotion > 10 || (!this._fusedMotion && this._gyroShakeLevel > 10));
+    var moderateShake = !strongShake && (this._fusedMotion > 4 || this._gyroShakeLevel > 5);
+
+    if (strongShake) {
       this._motionFrames++;
-      if (this._motionFrames > 20) {
-        // 매우 강한 흔들림 → 신호 리셋
+      this._isModerateShake = false;
+      if (this._motionFrames > 15) {
+        // 매우 강한 흔들림 지속 → 신호 리셋
         this._signalBuf = [];
         this.timestamps = [];
         this._chR = []; this._chG = []; this._chB = [];
         this._motionFrames = 0;
         this._bpfInitialized = false;
+        this._motionResetTime = now;  // 리셋 시각 기록
         if (this._prevGlobalPts) { this._prevGlobalPts.delete(); this._prevGlobalPts = null; }
       }
       if (this._prevGray) this._prevGray.delete();
       this._prevGray = currGray.clone();
       currMat.delete(); currGray.delete();
       return this.lastValidBpm;
+    } else if (moderateShake) {
+      // 중간 흔들림 — 이 프레임만 신호 수집 skip (리셋 없이)
+      this._isModerateShake = true;
+      this._motionFrames = Math.max(0, this._motionFrames - 1);
+      if (this._prevGray) this._prevGray.delete();
+      this._prevGray = currGray.clone();
+      currMat.delete(); currGray.delete();
+      return this.lastValidBpm;
     }
+    this._isModerateShake = false;
     this._motionFrames = 0;
 
     // 글로벌 모션 추정 (카메라 흔들림)

@@ -16,7 +16,7 @@
 | `sw.js` | Service Worker (PWA 오프라인, 캐시 버전 v7) |
 
 ## 현재 브랜치
-`claude/sync-github-updates-UnriZ`
+`main`
 
 ## 최근 작업 이력 (2026-03-28)
 
