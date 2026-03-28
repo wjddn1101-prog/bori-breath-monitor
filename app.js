@@ -269,6 +269,11 @@
         '\n\nSafari에서 https:// 주소로 접속해주세요.');
       return;
     }
+    // 기존 스트림 재사용 — iOS Safari 권한 재요청 방지
+    if (stream) {
+      _onStreamReady(stream);
+      return;
+    }
     var facingMode = $('#camera-select').value;
     try {
       navigator.mediaDevices.getUserMedia({
@@ -276,10 +281,20 @@
         audio: false,
       }).then(function(s) {
         stream = s;
-        video.srcObject = stream;
+        _onStreamReady(stream);
+      }).catch(function(e) {
+        showAlert('카메라 오류', '카메라에 접근할 수 없습니다.', '브라우저 설정에서 카메라 권한을 허용해주세요.\n\n' + (e.message || e));
+      });
+    } catch(e) {
+      showAlert('카메라 오류', '카메라 API를 사용할 수 없습니다.', e.message || String(e));
+    }
+  }
+
+  function _onStreamReady(s) {
+        video.srcObject = s;
         video.play();
 
-        videoTrack = stream.getVideoTracks()[0];
+        videoTrack = s.getVideoTracks()[0];
         $('#no-camera').classList.add('hidden');
         $('#btn-camera').textContent = '카메라 중지';
         $('#btn-roi').classList.add('hidden');
@@ -299,17 +314,12 @@
         setTimeout(function() {
             if (stream) startAutoMeasure();
         }, 1000);
-      }).catch(function(e) {
-        showAlert('카메라 오류', '카메라에 접근할 수 없습니다.', '브라우저 설정에서 카메라 권한을 허용해주세요.\n\n' + (e.message || e));
-      });
-    } catch(e) {
-      showAlert('카메라 오류', '카메라 API를 사용할 수 없습니다.', e.message || String(e));
-    }
   }
 
   function stopCamera() {
     if (flashOn) toggleFlash();
-    if (stream) { stream.getTracks().forEach(function(t) { t.stop(); }); stream = null; videoTrack = null; }
+    // 스트림은 유지 — iOS Safari 권한 재요청 방지 (재시작 시 기존 스트림 재사용)
+    video.pause();
     video.srcObject = null;
     $('#no-camera').classList.remove('hidden');
     $('#btn-camera').textContent = '카메라 시작';
