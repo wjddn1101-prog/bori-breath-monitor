@@ -1,13 +1,14 @@
 /**
- * 보리 호흡 분석기 v6 — ROI Mean Intensity Analysis
+ * 보리 호흡 분석기 v6 — ROI Tile Fusion Analysis
  *
  * v5 → v6 핵심 변경:
- *   1. Optical Flow 점 추적 → ROI 평균 밝기(Green채널) 분석
+ *   1. Optical Flow 점 추적 → ROI 타일 기반 밝기 분석
  *      - 카메라 흔들림에 강건: 흔들려도 ROI 평균 밝기는 거의 불변
  *      - 실제 호흡 = 표면 각도 변화 = 반사광 변화 = 밝기 주기적 변동
  *   2. 글로벌 모션 보상: 전체 프레임 이동량 추정 → ROI 위치 보정
  *   3. R/G/B 3채널 독립 추적 → 주기성 최강 채널 자동 선택
  *   4. 레퍼런스 영역 차분: ROI 외부 밝기 변화(조명 변동) 차감
+ *   5. 다중 타일 coherence + 로컬 모션 융합으로 저조도 안정성 보강
  *
  * 유지: FFT + 자기상관 + 피크카운팅 3중 교차 검증, 칼만 필터, Web Worker, 밴드패스
  */
@@ -30,6 +31,13 @@ class BreathingAnalyzer {
     this._chG = [];
     this._chB = [];
     this._bestChannel = 'g';  // 자동 선택될 최적 채널
+    this._tileCols = 4;
+    this._tileRows = 3;
+    this._tileSignals = [];
+    this._tileProfiles = [];
+    this._tileWeights = [];
+    this._tileCoherence = 0;
+    this._activeTileCount = 0;
 
     // === 글로벌 모션 보상 ===
     this._prevGray = null;
@@ -51,7 +59,7 @@ class BreathingAnalyzer {
     this.nullCount = 0;
 
     // 분석 방법별 BPM (UI 디버그용)
-    this.debugInfo = { acBpm: null, fftBpm: null, peakBpm: null, channel: 'g' };
+    this.debugInfo = { acBpm: null, fftBpm: null, peakBpm: null, channel: 'g', coherence: 0, activeTiles: 0 };
 
     // === 모션 게이트 ===
     this._prevBrightness = null;
@@ -170,6 +178,11 @@ class BreathingAnalyzer {
     this._chG = [];
     this._chB = [];
     this._bestChannel = 'g';
+    this._tileSignals = [];
+    this._tileProfiles = [];
+    this._tileWeights = [];
+    this._tileCoherence = 0;
+    this._activeTileCount = 0;
     this.smoothedSignal = [];
     this.peaks = [];
     this.startTime = Date.now();
@@ -200,7 +213,7 @@ class BreathingAnalyzer {
     this._workerBusy = false;
     this._lastWorkerPost = 0;
     this._lastAnalysisTime = 0;
-    this.debugInfo = { acBpm: null, fftBpm: null, peakBpm: null, channel: 'g' };
+    this.debugInfo = { acBpm: null, fftBpm: null, peakBpm: null, channel: 'g', coherence: 0, activeTiles: 0 };
     this._motionResetTime = 0;   // 마지막 신호 리셋 시각 (ms)
     this._isModerateShake = false; // 현재 중간 흔들림 여부
 
@@ -223,6 +236,28 @@ class BreathingAnalyzer {
 
   getElapsedSeconds() {
     return this.startTime ? Math.round((Date.now() - this.startTime) / 1000) : 0;
+  }
+
+  sampleFrameBrightness(video) {
+    if (!video || !video.videoWidth || !video.videoHeight) return null;
+
+    var vw = video.videoWidth, vh = video.videoHeight;
+    var scale = Math.min(1, 160 / vw);
+    var cw = Math.max(1, Math.round(vw * scale));
+    var ch = Math.max(1, Math.round(vh * scale));
+
+    this.canvas.width = cw;
+    this.canvas.height = ch;
+    this.ctx.drawImage(video, 0, 0, cw, ch);
+
+    var imgData = this.ctx.getImageData(0, 0, cw, ch).data;
+    var sum = 0;
+    var count = 0;
+    for (var i = 0; i < imgData.length; i += 4) {
+      sum += (imgData[i] + imgData[i + 1] + imgData[i + 2]) / 3;
+      count++;
+    }
+    return count > 0 ? sum / count : null;
   }
 
   // ========== Web Worker 초기화 ==========
@@ -371,6 +406,16 @@ class BreathingAnalyzer {
       else if (validRatio < 0.7) q -= 10;
     }
 
+    if (this._tileCoherence > 0) {
+      if (this._tileCoherence < 0.2) q -= 18;
+      else if (this._tileCoherence < 0.35) q -= 10;
+      else if (this._tileCoherence < 0.5) q -= 4;
+    }
+    if (this._activeTileCount > 0) {
+      if (this._activeTileCount < 2) q -= 10;
+      else if (this._activeTileCount < 3) q -= 4;
+    }
+
     if (this.nullCount > 60) q -= 15;
     else if (this.nullCount > 30) q -= 8;
 
@@ -427,6 +472,164 @@ class BreathingAnalyzer {
     return { dx: dxList[mid], dy: dyList[mid] };
   }
 
+  _estimateTileMotion(profile, tileIdx) {
+    var prev = this._tileProfiles[tileIdx];
+    this._tileProfiles[tileIdx] = profile.slice();
+    if (!prev || prev.length !== profile.length) return 0;
+
+    var cur = profile.slice();
+    var prv = prev.slice();
+    var curMean = 0, prvMean = 0;
+    for (var i = 0; i < cur.length; i++) {
+      curMean += cur[i];
+      prvMean += prv[i];
+    }
+    curMean /= cur.length;
+    prvMean /= prv.length;
+
+    var curMax = 0.0001, prvMax = 0.0001;
+    for (var i = 0; i < cur.length; i++) {
+      cur[i] -= curMean;
+      prv[i] -= prvMean;
+      curMax = Math.max(curMax, Math.abs(cur[i]));
+      prvMax = Math.max(prvMax, Math.abs(prv[i]));
+    }
+    for (var i = 0; i < cur.length; i++) {
+      cur[i] /= curMax;
+      prv[i] /= prvMax;
+    }
+
+    var shifts = [-2, -1, 0, 1, 2];
+    var scores = [];
+    var bestIdx = 0;
+    var bestScore = -1;
+
+    for (var si = 0; si < shifts.length; si++) {
+      var shift = shifts[si];
+      var sum = 0, sumA = 0, sumB = 0;
+      for (var i = 0; i < cur.length; i++) {
+        var j = i + shift;
+        if (j < 0 || j >= prv.length) continue;
+        sum += cur[i] * prv[j];
+        sumA += cur[i] * cur[i];
+        sumB += prv[j] * prv[j];
+      }
+      var score = (sumA > 0.0001 && sumB > 0.0001) ? (sum / Math.sqrt(sumA * sumB)) : -1;
+      scores.push(score);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = si;
+      }
+    }
+
+    if (bestScore < 0.2) return 0;
+
+    var bestShift = shifts[bestIdx];
+    if (bestIdx > 0 && bestIdx < scores.length - 1) {
+      var y0 = scores[bestIdx - 1];
+      var y1 = scores[bestIdx];
+      var y2 = scores[bestIdx + 1];
+      var denom = y0 - 2 * y1 + y2;
+      if (Math.abs(denom) > 0.0001) {
+        bestShift += 0.5 * (y0 - y2) / denom;
+      }
+    }
+
+    return bestShift;
+  }
+
+  _correlateSignals(a, b) {
+    var len = Math.min(a.length, b.length, 90);
+    if (len < 20) return 0;
+
+    var meanA = 0, meanB = 0;
+    for (var i = 0; i < len; i++) {
+      meanA += a[a.length - len + i];
+      meanB += b[b.length - len + i];
+    }
+    meanA /= len;
+    meanB /= len;
+
+    var sum = 0, sumA = 0, sumB = 0;
+    for (var i = 0; i < len; i++) {
+      var va = a[a.length - len + i] - meanA;
+      var vb = b[b.length - len + i] - meanB;
+      sum += va * vb;
+      sumA += va * va;
+      sumB += vb * vb;
+    }
+    if (sumA < 0.0001 || sumB < 0.0001) return 0;
+    return sum / Math.sqrt(sumA * sumB);
+  }
+
+  _updateTileFusionWeights(tiles) {
+    var weights = new Array(tiles.length);
+    var refIdx = -1;
+    var bestSeed = 0;
+
+    for (var i = 0; i < tiles.length; i++) {
+      var hist = this._tileSignals[i] || [];
+      var recent = hist.slice(-90);
+      var energy = recent.length >= 24 ? this._scoreROISignal(recent) : 0;
+      tiles[i].energy = energy;
+      var seed = energy * (0.35 + tiles[i].texture * 0.65);
+      if (seed > bestSeed) {
+        bestSeed = seed;
+        refIdx = i;
+      }
+    }
+
+    var maxWeight = 0;
+    var coherenceSum = 0;
+    var coherenceCount = 0;
+
+    if (refIdx >= 0 && bestSeed >= 0.0005) {
+      var refHist = this._tileSignals[refIdx] || [];
+      for (var i = 0; i < tiles.length; i++) {
+        var corr = (i === refIdx) ? 1 : this._correlateSignals(refHist, this._tileSignals[i] || []);
+        if (corr > 0) {
+          coherenceSum += corr;
+          coherenceCount++;
+        }
+        var weight = tiles[i].energy * Math.max(0, corr - 0.1) * (0.25 + tiles[i].texture * 0.75);
+        if (weight < bestSeed * 0.08) weight = 0;
+        weights[i] = weight;
+        if (weight > maxWeight) maxWeight = weight;
+      }
+      this._tileCoherence = coherenceCount > 0 ? (coherenceSum / coherenceCount) : 0;
+    } else {
+      this._tileCoherence = 0;
+      for (var i = 0; i < tiles.length; i++) {
+        var localWeight = tiles[i].texture * 0.6 +
+          Math.min(0.8, Math.abs(tiles[i].brightness) * 0.04) +
+          Math.min(0.6, Math.abs(tiles[i].motion) * 0.1);
+        weights[i] = localWeight;
+        if (localWeight > maxWeight) maxWeight = localWeight;
+      }
+    }
+
+    var activeCount = 0;
+    if (maxWeight > 0) {
+      for (var i = 0; i < weights.length; i++) {
+        if (weights[i] >= maxWeight * 0.35) activeCount++;
+      }
+    }
+    if (activeCount === 0 && weights.length > 0) {
+      var fallbackIdx = refIdx >= 0 ? refIdx : 0;
+      for (var i = 1; i < tiles.length; i++) {
+        if (tiles[i].texture > tiles[fallbackIdx].texture) fallbackIdx = i;
+      }
+      weights[fallbackIdx] = 1;
+      maxWeight = Math.max(maxWeight, 1);
+      activeCount = 1;
+    }
+
+    this._tileWeights = weights;
+    this._activeTileCount = activeCount;
+    this.debugInfo.coherence = Math.round(this._tileCoherence * 100) / 100;
+    this.debugInfo.activeTiles = activeCount;
+  }
+
   // ========== ROI 영역 평균 밝기 추출 (R, G, B 채널 별) ==========
   _extractROIMeanIntensity(imgData, cw, ch) {
     // ROI를 글로벌 모션만큼 보정
@@ -444,15 +647,46 @@ class BreathingAnalyzer {
     var data = imgData.data;
     var sumR = 0, sumG = 0, sumB = 0;
     var count = 0;
+    var tileCols = this._tileCols;
+    var tileRows = this._tileRows;
+    var tileCount = tileCols * tileRows;
+    var profileBins = 8;
+    var tiles = new Array(tileCount);
+    for (var ti = 0; ti < tileCount; ti++) {
+      tiles[ti] = {
+        sumR: 0, sumG: 0, sumB: 0, sumGray: 0, sumGray2: 0, count: 0,
+        profile: new Array(profileBins).fill(0),
+        profileCounts: new Array(profileBins).fill(0),
+        brightness: 0, motion: 0, fused: 0, texture: 0,
+        meanR: 0, meanG: 0, meanB: 0
+      };
+    }
+    var sampleStep = this.isLowLight ? 1 : 2;
 
     // ROI 내 픽셀 평균
-    for (var y = ry; y < ry + rh; y++) {
-      for (var x = rx; x < rx + rw; x++) {
+    for (var y = ry; y < ry + rh; y += sampleStep) {
+      var relY = (y - ry) / Math.max(1, rh);
+      var tileRow = Math.min(tileRows - 1, Math.floor(relY * tileRows));
+      var localY = relY * tileRows - tileRow;
+      var profileIdx = Math.min(profileBins - 1, Math.max(0, Math.floor(localY * profileBins)));
+      for (var x = rx; x < rx + rw; x += sampleStep) {
         var idx = (y * cw + x) * 4;
+        var relX = (x - rx) / Math.max(1, rw);
+        var tileCol = Math.min(tileCols - 1, Math.floor(relX * tileCols));
+        var tile = tiles[tileRow * tileCols + tileCol];
+        var gray = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
         sumR += data[idx];
         sumG += data[idx + 1];
         sumB += data[idx + 2];
         count++;
+        tile.sumR += data[idx];
+        tile.sumG += data[idx + 1];
+        tile.sumB += data[idx + 2];
+        tile.sumGray += gray;
+        tile.sumGray2 += gray * gray;
+        tile.count++;
+        tile.profile[profileIdx] += gray;
+        tile.profileCounts[profileIdx]++;
       }
     }
 
@@ -463,30 +697,100 @@ class BreathingAnalyzer {
     var meanB = sumB / count;
 
     // 레퍼런스 영역 (ROI 바로 위 또는 아래 — 조명 변동 차감용)
+    var refMeanR = 0;
     var refMeanG = 0;
+    var refMeanB = 0;
     var refCount = 0;
     var refY = ry - rh;  // ROI 바로 위
     if (refY < 0) refY = ry + rh; // 위가 없으면 아래
     var refYEnd = Math.min(ch, refY + Math.max(1, Math.round(rh * 0.5)));
     refY = Math.max(0, refY);
 
-    for (var y = refY; y < refYEnd; y++) {
-      for (var x = rx; x < rx + rw; x++) {
+    for (var y = refY; y < refYEnd; y += sampleStep) {
+      for (var x = rx; x < rx + rw; x += sampleStep) {
         var idx = (y * cw + x) * 4;
+        refMeanR += data[idx];
         refMeanG += data[idx + 1];
+        refMeanB += data[idx + 2];
         refCount++;
       }
     }
+    refMeanR = refCount > 0 ? refMeanR / refCount : meanR;
     refMeanG = refCount > 0 ? refMeanG / refCount : meanG;
+    refMeanB = refCount > 0 ? refMeanB / refCount : meanB;
+
+    var refBase = this._bestChannel === 'r' ? refMeanR : this._bestChannel === 'b' ? refMeanB : refMeanG;
+    for (var ti = 0; ti < tileCount; ti++) {
+      var tile = tiles[ti];
+      if (tile.count <= 0) continue;
+      tile.meanR = tile.sumR / tile.count;
+      tile.meanG = tile.sumG / tile.count;
+      tile.meanB = tile.sumB / tile.count;
+      var meanGray = tile.sumGray / tile.count;
+      var variance = Math.max(0, tile.sumGray2 / tile.count - meanGray * meanGray);
+      tile.texture = Math.min(1, Math.sqrt(variance) / 28);
+      for (var bi = 0; bi < profileBins; bi++) {
+        tile.profile[bi] = tile.profileCounts[bi] > 0 ? (tile.profile[bi] / tile.profileCounts[bi]) : meanGray;
+      }
+      tile.motion = this._estimateTileMotion(tile.profile, ti);
+      var tileBase = this._bestChannel === 'r' ? tile.meanR : this._bestChannel === 'b' ? tile.meanB : tile.meanG;
+      tile.brightness = tileBase - refBase;
+      var motionWeight = tile.texture < 0.08 ? 0 :
+        Math.min(this.isLowLight ? 0.55 : 0.4, 0.1 + tile.texture * 0.45 + (this.isLowLight ? 0.1 : 0));
+      var motionResp = tile.motion * (2.5 + tile.texture * 5.5);
+      tile.fused = tile.brightness * (1 - motionWeight) + motionResp * motionWeight;
+      if (!this._tileSignals[ti]) this._tileSignals[ti] = [];
+      this._tileSignals[ti].push(tile.fused);
+      if (this._tileSignals[ti].length > 180) this._tileSignals[ti].shift();
+    }
+
+    if (!this._tileWeights.length || this._totalFrameCount % 6 === 0) {
+      this._updateTileFusionWeights(tiles);
+    }
+
+    var weightedR = 0, weightedG = 0, weightedB = 0, weightedFused = 0, weightedMotion = 0;
+    var weightSum = 0;
+    var fallbackIdx = 0;
+    for (var ti = 1; ti < tileCount; ti++) {
+      if (tiles[ti].texture + Math.abs(tiles[ti].fused) * 0.02 > tiles[fallbackIdx].texture + Math.abs(tiles[fallbackIdx].fused) * 0.02) {
+        fallbackIdx = ti;
+      }
+    }
+    for (var ti = 0; ti < tileCount; ti++) {
+      var tile = tiles[ti];
+      var w = this._tileWeights[ti] || 0;
+      if (w <= 0 || tile.count <= 0) continue;
+      weightSum += w;
+      weightedR += tile.meanR * w;
+      weightedG += tile.meanG * w;
+      weightedB += tile.meanB * w;
+      weightedFused += tile.fused * w;
+      weightedMotion += tile.motion * w;
+    }
+    if (weightSum <= 0) {
+      var fallback = tiles[fallbackIdx];
+      weightSum = 1;
+      weightedR = fallback.meanR;
+      weightedG = fallback.meanG;
+      weightedB = fallback.meanB;
+      weightedFused = fallback.fused;
+      weightedMotion = fallback.motion;
+    }
 
     // UI 시각화용: ROI 영역에 밝기 변화 격자 표시
     this._updateVisualization(rx, ry, rw, rh, cw, ch);
 
     return {
-      r: meanR,
-      g: meanG,
-      b: meanB,
+      r: weightedR / weightSum,
+      g: weightedG / weightSum,
+      b: weightedB / weightSum,
+      refR: refMeanR,
       ref: refMeanG,
+      refB: refMeanB,
+      fused: weightedFused / weightSum,
+      motion: weightedMotion / weightSum,
+      coherence: this._tileCoherence,
+      activeTiles: this._activeTileCount,
       brightness: (meanR + meanG + meanB) / 3
     };
   }
@@ -607,6 +911,11 @@ class BreathingAnalyzer {
         this._signalBuf = [];
         this.timestamps = [];
         this._chR = []; this._chG = []; this._chB = [];
+        this._tileSignals = [];
+        this._tileProfiles = [];
+        this._tileWeights = [];
+        this._tileCoherence = 0;
+        this._activeTileCount = 0;
         this._motionFrames = 0;
         this._bpfInitialized = false;
         this._motionResetTime = now;  // 리셋 시각 기록
@@ -661,11 +970,12 @@ class BreathingAnalyzer {
     if (!intensity) return this.lastValidBpm;
 
     // === 채널별 밝기 버퍼에 추가 ===
-    // 레퍼런스 차분: ROI 밝기 - 레퍼런스 밝기 (조명 변동 제거)
+    var correctedR = intensity.r - (typeof intensity.refR === 'number' ? intensity.refR : intensity.r);
     var correctedG = intensity.g - intensity.ref;
-    this._chR.push(intensity.r);
+    var correctedB = intensity.b - (typeof intensity.refB === 'number' ? intensity.refB : intensity.b);
+    this._chR.push(correctedR);
     this._chG.push(correctedG);
-    this._chB.push(intensity.b);
+    this._chB.push(correctedB);
 
     // 60프레임마다 최적 채널 선택
     if (this._totalFrameCount % 60 === 0) {
@@ -674,9 +984,12 @@ class BreathingAnalyzer {
 
     // 선택된 채널의 값을 주 신호로 사용
     var rawValue;
-    if (this._bestChannel === 'r') rawValue = intensity.r;
-    else if (this._bestChannel === 'b') rawValue = intensity.b;
+    if (this._bestChannel === 'r') rawValue = correctedR;
+    else if (this._bestChannel === 'b') rawValue = correctedB;
     else rawValue = correctedG;
+    if (typeof intensity.fused === 'number' && isFinite(intensity.fused)) {
+      rawValue = this.isLowLight ? intensity.fused : (intensity.fused * 0.75 + rawValue * 0.25);
+    }
 
     // 밴드패스 필터 적용
     if (!this._bpfInitialized) {
@@ -785,10 +1098,15 @@ class BreathingAnalyzer {
 
   // BPM 결과 → (Phase 3) ML 분류기 체크 → 칼만 필터 → 반환
   _processResult(bpm) {
+    if (bpm !== null && this._tileCoherence < 0.16 && this._activeTileCount < 2) {
+      bpm = null;
+    }
+
     // Phase 3: TF.js 분류기로 노이즈 신호 억제
     if (bpm !== null && this._classifier && this._classifier.isReady && this.smoothedSignal.length > 50) {
       var mlConf = this._classifier.predict(this.smoothedSignal);
-      if (mlConf < 0.35) {
+      var mlThreshold = this._tileCoherence < 0.28 ? 0.42 : 0.35;
+      if (mlConf < mlThreshold) {
         this._mlSuppressCount++;
         bpm = null;
       } else {
@@ -1201,7 +1519,7 @@ class BreathingAnalyzer {
     try {
       var stored = JSON.parse(localStorage.getItem(this._mlDataKey) || '{"version":1,"samples":[]}');
       var samples = (stored.samples || []).filter(function(s) {
-        return Math.abs((s.lightLevel || 80) - lightLevel) <= 25;
+        return s.correct === true && Math.abs((s.lightLevel || 80) - lightLevel) <= 25;
       });
       if (samples.length < 3) return null;
       var sensCount = {};

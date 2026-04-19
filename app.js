@@ -240,6 +240,7 @@
   var autoTimerId = null;
   var autoBpmHistory = [];
   var currentAutoBpm = null;
+  var overlayResizeBound = false;
 
   // ROI
   var roiMode = false;
@@ -302,7 +303,10 @@
         analyzer.setROI(currentROI, false);  // userSet=false → 측정 시 ROI 자동 탐색 실행
         
         fitOverlay();
-        window.addEventListener('resize', fitOverlay);
+        if (!overlayResizeBound) {
+          window.addEventListener('resize', fitOverlay);
+          overlayResizeBound = true;
+        }
         checkFlashCapability();
         
         // 1초 뒤 자동 측정 시작
@@ -320,6 +324,10 @@
       stream = null;
     }
     videoTrack = null;
+    if (overlayResizeBound) {
+      window.removeEventListener('resize', fitOverlay);
+      overlayResizeBound = false;
+    }
     video.pause();
     video.srcObject = null;
     $('#no-camera').classList.remove('hidden');
@@ -329,6 +337,8 @@
     $('#btn-auto-stop').classList.add('hidden');
     $('#auto-bpm-display').classList.add('hidden');
     $('#light-controls').classList.add('hidden');
+    $('#btn-flash').style.display = 'none';
+    $('#flash-tip').classList.add('hidden');
     setBrightness(0);
     currentROI = null;
     setAutoStatus('카메라를 시작하세요', 'idle');
@@ -342,16 +352,17 @@
 
   // --- 플래시 (torch) ---
   function checkFlashCapability() {
-    if (!videoTrack) return;
+    var flashBtn = $('#btn-flash');
+    if (!flashBtn) return;
+    if (!videoTrack) {
+      flashBtn.style.display = 'none';
+      return;
+    }
     try {
       var caps = videoTrack.getCapabilities();
-      if (caps && caps.torch) {
-        $('#btn-flash').style.display = 'flex';
-      } else {
-        $('#btn-flash').style.display = 'flex';
-      }
+      flashBtn.style.display = (caps && caps.torch) ? 'flex' : 'none';
     } catch(e) {
-      $('#btn-flash').style.display = 'flex';
+      flashBtn.style.display = 'none';
     }
   }
 
@@ -531,6 +542,8 @@
     currentAutoBpm = null;
 
     // Phase 2: 적응 학습 — 비슷한 조도 환경에서의 성공 파라미터 로드
+    var sampledBrightness = analyzer.sampleFrameBrightness(video);
+    if (sampledBrightness !== null) analyzer._frameBrightness = sampledBrightness;
     var adaptiveP = analyzer.loadAdaptiveParams(analyzer._frameBrightness || 80);
     if (adaptiveP && adaptiveP.sampleCount >= 3) {
       $('#sensitivity').value = adaptiveP.sensitivity;
