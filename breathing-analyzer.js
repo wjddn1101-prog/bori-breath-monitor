@@ -36,6 +36,8 @@ class BreathingAnalyzer {
     this._prevGlobalPts = null;
     this._roiOffsetX = 0;    // 카메라 이동 누적 보정값
     this._roiOffsetY = 0;
+    this._gyroRateBeta = 0;  // 자이로 앞뒤 각속도 (deg/s) → Y축 보정
+    this._gyroRateGamma = 0; // 자이로 좌우 각속도 (deg/s) → X축 보정
 
     // UI 시각화용 (호환성 유지)
     this.trackedPoints = [];
@@ -267,6 +269,9 @@ class BreathingAnalyzer {
       if (r) {
         var gyroMag = Math.sqrt((r.alpha || 0) ** 2 + (r.beta || 0) ** 2 + (r.gamma || 0) ** 2);
         this._gyroShakeLevel = this._gyroShakeLevel * 0.7 + gyroMag * 0.3;
+        // 방향성 각속도 저장 (ROI 오프셋 보정에 사용)
+        this._gyroRateBeta  = r.beta  || 0;
+        this._gyroRateGamma = r.gamma || 0;
       }
 
       var a = event.acceleration;
@@ -623,10 +628,13 @@ class BreathingAnalyzer {
     this._isModerateShake = false;
     this._motionFrames = 0;
 
-    // 글로벌 모션 추정 (카메라 흔들림)
+    // 글로벌 모션 추정 (카메라 흔들림) + 자이로 방향성 융합
     var globalMotion = this._estimateGlobalMotion(currGray);
-    this._roiOffsetX += globalMotion.dx;
-    this._roiOffsetY += globalMotion.dy;
+    // 자이로 각속도(deg/s) → 픽셀 이동량 변환 (가중치 0.25로 보수적 적용)
+    var gyroDx = this._gyroRateGamma * dt * (cw / 90.0) * 0.25;
+    var gyroDy = this._gyroRateBeta  * dt * (ch / 90.0) * 0.25;
+    this._roiOffsetX += globalMotion.dx + gyroDx;
+    this._roiOffsetY += globalMotion.dy + gyroDy;
 
     // 보정값이 너무 커지면 리셋 (장기 드리프트 방지)
     if (Math.abs(this._roiOffsetX) > cw * 0.3 || Math.abs(this._roiOffsetY) > ch * 0.3) {
@@ -636,6 +644,14 @@ class BreathingAnalyzer {
 
     // ROI 평균 밝기 추출
     var intensity = this._extractROIMeanIntensity(imgData, cw, ch);
+    // 저조도 신호 증폭 — 밝기 60 미만 시 최대 2배 게인 적용
+    if (intensity && this._frameBrightness < 60) {
+      var gain = 1.0 + (60 - this._frameBrightness) / 60 * 1.0;
+      gain = Math.min(2.0, gain);
+      intensity.r *= gain;
+      intensity.g *= gain;
+      intensity.b *= gain;
+    }
 
     // 이전 프레임 저장 (글로벌 모션용)
     if (this._prevGray) this._prevGray.delete();

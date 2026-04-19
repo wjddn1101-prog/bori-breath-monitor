@@ -272,7 +272,7 @@
     var facingMode = $('#camera-select').value;
     try {
       navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingMode, width: {ideal:640}, height: {ideal:480} },
+        video: { facingMode: facingMode, width: {ideal:1280}, height: {ideal:720}, frameRate: {ideal:120, max:120} },
         audio: false,
       }).then(function(s) {
         stream = s;
