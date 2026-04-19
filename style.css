@@ -1,37 +1,37 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-  /* 배경 — Claude 크림 톤 */
-  --bg: #F5F4EE;
-  --bg-subtle: #EEEDE5;
-  --card: #FFFFFF;
-  --card-hover: #FAF9F4;
+  /* 배경 — 진한 크림 톤 */
+  --bg: #E8E2D3;
+  --bg-subtle: #D9D2BF;
+  --card: #F9F5EB;
+  --card-hover: #F2EDE0;
 
-  /* 텍스트 — 따뜻한 그레이 */
-  --text: #1F1E1B;
-  --text2: #6B6A64;
-  --text3: #9C9B95;
+  /* 텍스트 — 진한 다크 */
+  --text: #141310;
+  --text2: #4A453B;
+  --text3: #7D7768;
 
-  /* 포인트 — Claude 오렌지 */
-  --accent: #C96442;
-  --accent-hover: #B85638;
-  --accent-soft: #F5E6DD;
-  --accent-glow: rgba(201, 100, 66, 0.12);
+  /* 포인트 — 진한 Claude 오렌지 */
+  --accent: #A84A20;
+  --accent-hover: #8E3C15;
+  --accent-soft: #E8C9B2;
+  --accent-glow: rgba(168, 74, 32, 0.18);
 
-  /* 상태 — 톤 다운 */
-  --green: #2F8F4E;
-  --green-soft: #E6F2E8;
-  --yellow: #C69021;
-  --yellow-soft: #FAF0D8;
-  --red: #C73E3E;
-  --red-soft: #FCE7E7;
+  /* 상태 — 진한 톤 */
+  --green: #1F6B36;
+  --green-soft: #C9E0CD;
+  --yellow: #A07315;
+  --yellow-soft: #F0DFA8;
+  --red: #A82828;
+  --red-soft: #EFC7C7;
 
   /* 테두리 & 섀도우 */
-  --border: #E5E2D8;
-  --border-strong: #D4D0C4;
-  --shadow-sm: 0 1px 2px rgba(31,30,27,0.04);
-  --shadow: 0 1px 3px rgba(31,30,27,0.06), 0 4px 12px rgba(31,30,27,0.04);
-  --shadow-lg: 0 8px 24px rgba(31,30,27,0.08);
+  --border: #C5BDA8;
+  --border-strong: #A89E85;
+  --shadow-sm: 0 1px 2px rgba(20,19,16,0.08);
+  --shadow: 0 2px 4px rgba(20,19,16,0.10), 0 6px 16px rgba(20,19,16,0.08);
+  --shadow-lg: 0 12px 32px rgba(20,19,16,0.14);
 
   --radius: 16px;
   --radius-sm: 10px;
