@@ -1,4 +1,4 @@
-const CACHE_NAME = 'bori-breath-v12';
+const CACHE_NAME = 'bori-breath-v13';
 const ASSETS = [
   './',
   './index.html',
